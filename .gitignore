@@ -8,3 +8,5 @@ __pycache__/
 
 # Log do supervisor do Windows (bot.bat), um arquivo por dia.
 logs/
+*.db-journal
+*.db
