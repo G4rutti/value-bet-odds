@@ -7,7 +7,8 @@ from datetime import datetime, timedelta, timezone
 
 from betano_superodds.value import config, consenso, stake
 from betano_superodds.value.fair_odds import calcular_odd_justa, prob_da_perna, remover_vig
-from betano_superodds.value.market_parser import Leg, parse_leg, parse_mercado, tipo_mercado
+from betano_superodds.value.market_parser import (ChaveConsenso, Leg, chave_consenso,
+                                                    parse_leg, parse_mercado, tipo_mercado)
 from betano_superodds.value.matcher import encontrar_evento, normalizar, score_times
 from betano_superodds.value.modelo_gols import _melhor_total, ajustar, matriz_placares
 from betano_superodds.value.models import Market, Matchup, american_para_decimal
@@ -210,6 +211,55 @@ class TestMarketParser(unittest.TestCase):
         oferta como sempre trataram."""
         legs = parse_mercado("Resultado Final: Celtic + Total de Gols Mais de 2.5")
         self.assertTrue(all(l.evento_texto is None for l in legs))
+
+
+class TestChaveConsenso(unittest.TestCase):
+    """A chave que casa uma perna sem cobertura Pinnacle contra o pool, sem
+    fuzzy de string. Os negativos importam mais que os positivos: casar um
+    escopo restrito (time/jogador) com a referência ampla (jogo inteiro) é a
+    mesma classe de bug do falso +23,6% do Internacional."""
+
+    def test_grafias_diferentes_do_mesmo_mercado_casam(self):
+        self.assertEqual(chave_consenso("Total de Cartões Mais de 4.5"),
+                         chave_consenso("Total cartões Mais de 4.5"))
+
+    def test_prop_de_jogador_com_limite_de_soma_um(self):
+        chave = chave_consenso("Lucas Barbosa Chutes no gol 1+")
+        self.assertEqual(chave, ChaveConsenso(familia="chutes_gol",
+                                              escopo="jogador:lucas barbosa",
+                                              lado="over", linha=0.5))
+
+    def test_entidade_de_time_nao_casa_com_jogo_inteiro(self):
+        """"Cartões do Grêmio" é o time; "Total de Cartões" é o jogo. Casar os
+        dois infla o edge do mesmo jeito que o mercado restrito x referência
+        ampla documentado na skill `value-bet-methodology`."""
+        self.assertNotEqual(chave_consenso("Cartões do Grêmio Mais de 1.5"),
+                            chave_consenso("Total de Cartões Mais de 1.5"))
+
+    def test_primeiro_tempo_nao_casa_com_jogo_inteiro(self):
+        self.assertNotEqual(
+            chave_consenso("1º tempo - total cartões Mais de 1.5"),
+            chave_consenso("Total cartões Mais de 1.5"))
+
+    def test_segundo_tempo_nao_colapsa_pro_jogo_inteiro(self):
+        """Mesma armadilha do `_sufixo_especial`, noutra dimensão: 2º tempo
+        não pode virar jogo inteiro por omissão."""
+        self.assertNotEqual(
+            chave_consenso("2º tempo - total cartões Mais de 1.5"),
+            chave_consenso("Total cartões Mais de 1.5"))
+
+    def test_parse_mercado_continua_recusando_cartoes(self):
+        """Regressão: `consenso_chave` é campo aditivo, não muda `suportado`
+        nem `motivo` do caminho Pinnacle."""
+        leg = parse_leg("Total de Cartões Mais de 4.5")
+        self.assertFalse(leg.suportado)
+        self.assertEqual(leg.motivo, "cartões")
+        self.assertIsNotNone(leg.consenso_chave)
+
+    def test_perna_suportada_nao_ganha_consenso_chave(self):
+        leg = parse_leg("Total de Gols Mais de 2.5")
+        self.assertTrue(leg.suportado)
+        self.assertIsNone(leg.consenso_chave)
 
 
 class TestMatcher(unittest.TestCase):
@@ -1095,6 +1145,32 @@ class TestConsenso(unittest.TestCase):
                                "Mais de 3.5")
         self.assertEqual(r2.n_precos, 6)
         self.assertTrue(r2.independente)
+
+    def test_chave_canonica_forma_consenso_sem_dois_pontos(self):
+        """"Total de Cartões Mais de 4.5" (rótulo da oferta, SEM ":") tem que
+        formar consenso contra um pool com grafia "Total cartões"/"Mais de
+        4.5" (SEM ":" também, mas layout diferente do rótulo). Só entra no
+        fallback canônico porque o literal (igualdade de string) não forma."""
+        linhas = (_linhas_casa("VaiDeBet", 1.90, 1.90, "Total cartões", "4.5")
+                  + _linhas_casa("EstrelaBet", 1.95, 1.85, "Total cartões", "4.5")
+                  + _linhas_casa("vupi", 1.88, 1.92, "Total cartões", "4.5")
+                  + _linhas_casa("BateuBet", 1.92, 1.88, "Total cartões", "4.5")
+                  + _linhas_casa("4Play", 1.87, 1.93, "Total cartões", "4.5")
+                  + _linhas_casa("GingaBet", 1.93, 1.87, "Total cartões", "4.5"))
+        storage = StorageFake(linhas)
+        provedor = consenso.ProvedorConsenso(storage, evento_id="1")
+        canonico = provedor.prob_para("Total de Cartões Mais de 4.5")
+        self.assertIsNotNone(canonico, "chave canônica não formou consenso")
+
+        # Mesmo cenário, rótulo COM ":" — caminho literal de hoje.
+        provedor_literal = consenso.ProvedorConsenso(StorageFake(linhas), evento_id="1")
+        literal = provedor_literal.prob_para("Total cartões: Mais de 4.5")
+        self.assertIsNotNone(literal)
+
+        self.assertEqual(canonico.prob.odd_justa, literal.prob.odd_justa,
+                         "deriva numérica entre o caminho canônico e o literal")
+        self.assertEqual(canonico.n_casas, literal.n_casas)
+        self.assertEqual(canonico.n_precos, literal.n_precos)
 
     def test_threshold_de_consenso_e_maior_que_o_de_pinnacle(self):
         """Casa mole pode estar errada junto — o piso tem que subir."""

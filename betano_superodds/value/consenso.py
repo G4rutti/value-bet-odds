@@ -48,6 +48,7 @@ from statistics import median
 
 from . import config
 from .fair_odds import ProbJusta, remover_vig
+from .market_parser import ChaveConsenso, chave_consenso
 from .models import Market
 
 log = logging.getLogger(__name__)
@@ -75,6 +76,15 @@ _PROP_PALAVRAS = re.compile(
 
 def _eh_mercado_prop(market_nome: str) -> bool:
     return bool(_PROP_PALAVRAS.search(market_nome))
+
+
+# Mesmas quatro famílias que `_PROP_PALAVRAS` cobre por regex, só que pelo
+# campo estruturado — usado quando o casamento veio por `ChaveConsenso`
+# (fallback canônico) em vez de igualdade de string do `market_nome`. Não
+# inclui `tie_break`/`duplas_faltas`/`aces` de propósito: o regex antigo
+# também não casava essas palavras, então o mínimo genérico é o comportamento
+# equivalente, não uma mudança de critério.
+_FAMILIAS_PROP = frozenset({"cartoes", "chutes_gol", "artilheiro"})
 
 
 def _normalizar(texto: str) -> str:
@@ -182,19 +192,108 @@ def _mercados_por_casa(linhas: list[dict], market_nome: str, selecao: str,
     }
 
 
+def _chave_da_linha(linha: dict) -> ChaveConsenso | None:
+    """`ChaveConsenso` de uma linha do pool, montada de `market_nome` +
+    `selecao` concatenados — o mesmo par que o rótulo `"Mercado: Seleção"`
+    representa no caminho literal."""
+    texto = f"{linha.get('market_nome', '')} {linha.get('selecao', '')}".strip()
+    return chave_consenso(texto)
+
+
+def _mercados_por_casa_canonico(
+        linhas: list[dict], chave_alvo: ChaveConsenso, excluir_casa: str | None,
+) -> dict[str, tuple[Market, str]]:
+    """Mesma unidade de de-vig de `_mercados_por_casa` — o PAR da mesma linha
+    (ou o bloco inteiro do `market_id`, quando a seleção não tem linha) —,
+    só que casando por `ChaveConsenso` em vez de igualdade de string do nome
+    do mercado.
+
+    ⚠️ Restrição inegociável (ver `_mercados_por_casa`): a canonicalização
+    muda só a BUSCA da linha certa. A unidade de de-vig continua restrita ao
+    `(casa, market_id)` e à linha exata de `chave_alvo` — nunca "tudo com a
+    mesma família", que somaria dezenas de seleções e faria `remover_vig`
+    recusar tudo silenciosamente.
+
+    Guarda de escopo: só entram linhas cuja `ChaveConsenso` tem a MESMA
+    família, o MESMO escopo (um `time:`/`jogador:` nunca casa com `jogo`, e
+    vice-versa — é o análogo da guarda que `fair_odds.prob_da_perna` já faz
+    pro caminho Pinnacle) e a MESMA linha.
+    """
+    por_bloco: dict[tuple[str, str], dict[str, tuple[float, str | None]]] = {}
+    for linha in linhas:
+        if excluir_casa and linha["casa"] == excluir_casa:
+            continue
+        chave_linha = _chave_da_linha(linha)
+        if chave_linha is None:
+            continue
+        if (chave_linha.familia != chave_alvo.familia
+                or chave_linha.escopo != chave_alvo.escopo
+                or chave_linha.linha != chave_alvo.linha):
+            continue
+        preco = float(linha["preco"])
+        if preco <= 1.0:
+            continue
+        sel = _normalizar(linha["selecao"])
+        bloco = (linha["casa"], str(linha.get("market_id", "")))
+        por_bloco.setdefault(bloco, {})[sel] = (preco, chave_linha.lado)
+
+    melhor: dict[str, dict[str, float]] = {}
+    alvo_por_casa: dict[str, str] = {}
+    for (casa, _mid), outcomes in por_bloco.items():
+        alvo_sel = next((sel for sel, (_preco, lado) in outcomes.items()
+                         if lado == chave_alvo.lado), None)
+        precos = {sel: preco for sel, (preco, _lado) in outcomes.items()}
+        if alvo_sel is None or len(precos) < 2:
+            continue
+        # Menos lados = mercado mais específico, mesma lógica de
+        # `_mercados_por_casa`.
+        atual = melhor.get(casa)
+        if atual is None or len(precos) < len(atual):
+            melhor[casa] = precos
+            alvo_por_casa[casa] = alvo_sel
+
+    return {
+        casa: (Market(key="consenso", label=chave_alvo.familia, outcomes=outcomes),
+               alvo_por_casa[casa])
+        for casa, outcomes in melhor.items()
+    }
+
+
 def calcular(linhas: list[dict], market_nome: str, selecao: str,
-             excluir_casa: str | None = None) -> ResultadoConsenso | None:
+             excluir_casa: str | None = None,
+             chave_alvo: ChaveConsenso | None = None) -> ResultadoConsenso | None:
     """Probabilidade de-vigada de `selecao`, por consenso entre casas.
 
     `linhas` vem de `Storage.mercados_para_consenso`. Devolve None quando não há
     casas suficientes — nunca devolve um número com ressalva, porque quem chama
     trataria como preço observado.
+
+    Dois modos de casamento, em fallback (nunca substituição): primeiro tenta
+    o literal de sempre (`market_nome`/`selecao` por igualdade de string). Só
+    quando ele não forma nenhum mercado é que `chave_alvo` (se veio) é usada
+    pro casamento canônico — regressão zero por construção no caminho que já
+    funcionava.
     """
-    mercados = _mercados_por_casa(linhas, market_nome, selecao, excluir_casa)
+    mercados: dict[str, Market] = {}
+    alvo_por_casa: dict[str, str] = {}
+    modo_canonico = False
+
+    if market_nome:
+        mercados = _mercados_por_casa(linhas, market_nome, selecao, excluir_casa)
+        if mercados:
+            alvo_norm = _normalizar(selecao)
+            alvo_por_casa = {casa: alvo_norm for casa in mercados}
+
+    if not mercados and chave_alvo is not None:
+        canonico = _mercados_por_casa_canonico(linhas, chave_alvo, excluir_casa)
+        if canonico:
+            mercados = {casa: mkt for casa, (mkt, _alvo) in canonico.items()}
+            alvo_por_casa = {casa: alvo for casa, (_mkt, alvo) in canonico.items()}
+            modo_canonico = True
+
     if not mercados:
         return None
 
-    alvo = _normalizar(selecao)
     probs: list[float] = []
     casas: list[str] = []
     for casa, market in sorted(mercados.items()):
@@ -202,6 +301,7 @@ def calcular(linhas: list[dict], market_nome: str, selecao: str,
         # mesma guarda usada na Pinnacle, e é ela que tira do consenso a casa
         # com uma perna suspensa ou preço corrompido.
         justas = remover_vig(market)
+        alvo = alvo_por_casa[casa]
         if not justas or alvo not in justas:
             continue
         probs.append(justas[alvo].probabilidade)
@@ -210,12 +310,19 @@ def calcular(linhas: list[dict], market_nome: str, selecao: str,
     # Cartão/chute ao gol/artilheiro/handicap pedem mais casas que o consenso
     # genérico — são a classe mais fraca da tabela de confiança, sem a
     # Pinnacle corrigindo o preço por trás (handicap normalmente TEM Pinnacle;
-    # só chega até aqui quando a linha específica não está publicada).
-    minimo = (config.CONSENSO_MIN_CASAS_PROP if _eh_mercado_prop(market_nome)
-             else config.CONSENSO_MIN_CASAS)
+    # só chega até aqui quando a linha específica não está publicada). No
+    # caminho canônico o mínimo vem da `familia` da chave, não do regex de
+    # `market_nome` — o regex nunca viu a grafia do pool.
+    if modo_canonico:
+        minimo = (config.CONSENSO_MIN_CASAS_PROP
+                 if chave_alvo.familia in _FAMILIAS_PROP
+                 else config.CONSENSO_MIN_CASAS)
+    else:
+        minimo = (config.CONSENSO_MIN_CASAS_PROP if _eh_mercado_prop(market_nome)
+                 else config.CONSENSO_MIN_CASAS)
     if len(probs) < minimo:
         log.debug("consenso insuficiente para %s / %s: %d casa(s), mínimo %d",
-                  market_nome, selecao, len(probs), minimo)
+                  market_nome or chave_alvo, selecao, len(probs), minimo)
         return None
 
     p = median(probs)
@@ -227,6 +334,9 @@ def calcular(linhas: list[dict], market_nome: str, selecao: str,
     # casa decimal é ruído de arredondamento da API, não opinião diferente.
     n_precos = len({round(x, 4) for x in probs})
 
+    rotulo_mercado = (market_nome if not modo_canonico
+                      else f"{chave_alvo.familia}:{chave_alvo.escopo}")
+    sufixo = " (via chave canônica)" if modo_canonico else ""
     return ResultadoConsenso(
         prob=ProbJusta(
             probabilidade=p,
@@ -234,7 +344,7 @@ def calcular(linhas: list[dict], market_nome: str, selecao: str,
             # A margem individual já foi removida casa a casa; o que sobra aqui
             # é dispersão entre casas, não overround. Zero é a resposta honesta.
             overround=0.0,
-            mercado=f"{market_nome} ({len(probs)} casas, {n_precos} preço(s))",
+            mercado=f"{rotulo_mercado} ({len(probs)} casas, {n_precos} preço(s)){sufixo}",
             consenso=True,
         ),
         n_casas=len(probs),
@@ -263,18 +373,28 @@ class ProvedorConsenso:
         return self._cache
 
     def prob_para(self, texto_perna: str) -> ResultadoConsenso | None:
-        """Consenso para uma perna crua, no formato "Mercado: Seleção".
+        """Consenso para uma perna crua.
 
-        É esse o rótulo que os parsers das casas montam
-        (`esportiva._ofertas_do_detalhe`), e é ele que sobra quando a perna não
-        tem cobertura na Pinnacle. Sem o separador não dá pra saber de que
-        mercado é a seleção — e adivinhar é como nasce edge falso.
+        Formato "Mercado: Seleção" é o rótulo que os parsers das casas montam
+        (`esportiva._ofertas_do_detalhe`) — comportamento idêntico a sempre:
+        `partition(":")` e casamento literal por igualdade de string.
+
+        Sem ":" (achado real: "Total de Cartões Mais de 4.5"), o casamento
+        literal não tem como funcionar — não há como separar mercado de
+        seleção por string. Tenta a chave canônica (`chave_consenso`) em vez
+        de recusar de cara: ela é o mesmo espaço que casa a grafia do pool
+        ("Total cartões: Mais de 4.5", COM ":", mas de um jeito diferente do
+        rótulo da oferta). Perna sem chave reconhecida (motivo fora de
+        `_FAMILIA_POR_MOTIVO`) morre aqui, sem adivinhar.
         """
-        if ":" not in texto_perna:
-            return None
-        market_nome, _, selecao = texto_perna.partition(":")
         linhas = self._linhas()
         if not linhas:
             return None
-        return calcular(linhas, market_nome.strip(), selecao.strip(),
-                        excluir_casa=self.casa)
+        if ":" in texto_perna:
+            market_nome, _, selecao = texto_perna.partition(":")
+            return calcular(linhas, market_nome.strip(), selecao.strip(),
+                            excluir_casa=self.casa)
+        chave = chave_consenso(texto_perna)
+        if chave is None:
+            return None
+        return calcular(linhas, "", "", excluir_casa=self.casa, chave_alvo=chave)

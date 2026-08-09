@@ -94,6 +94,38 @@ SEM_COBERTURA: tuple[tuple[str, str], ...] = (
     (r"^\s*(primeiro|(ú|u)ltimo)\s*$", "artilheiro (prop de jogador)"),
 )
 
+# --- chave canônica pra casamento no consenso (Etapa 1) ---------------------
+# `market_key`/`suportado`/`motivo` continuam intocados: são o espaço da
+# Pinnacle. `ChaveConsenso` é um espaço PARALELO, só pra `consenso.py` casar o
+# rótulo da oferta ("Total de Cartões Mais de 4.5") contra a grafia do pool
+# ("Total cartões: Mais de 4.5") sem fuzzy de string — ver a nota da skill
+# `value-bet-methodology` sobre por que fuzzy de nome de mercado é proibido.
+#
+# Duas chaves só casam se os QUATRO campos forem iguais. Nunca dê `market_key`
+# a uma perna que ganhou `ChaveConsenso`: roteá-la pra `prob_da_perna`
+# repetiria a classe de bug "mercado restrito casado com referência ampla"
+# (o falso +23,6% do Internacional).
+@dataclass(frozen=True)
+class ChaveConsenso:
+    familia: str          # "cartoes" | "chutes_gol" | "artilheiro" | "tie_break" | ...
+    escopo: str            # "jogo" | "1t" | "time:<norm>" | "jogador:<norm>"
+    lado: str | None       # "over" | "under" | "sim" | "nao"
+    linha: float | None
+
+
+# Traduz o `motivo` (já verificado contra a API — ver o cabeçalho do arquivo)
+# pra uma família de mercado. Motivo sem entrada aqui devolve `None` em
+# `chave_consenso` — nunca chuta a família de um motivo desconhecido.
+_FAMILIA_POR_MOTIVO: dict[str, str] = {
+    "cartões": "cartoes",
+    "chutes no gol": "chutes_gol",
+    "artilheiro (prop de jogador)": "artilheiro",
+    "duplas faltas": "duplas_faltas",
+    "aces": "aces",
+    "tie-break": "tie_break",
+}
+
+
 # --- mercados COMBINADOS num rótulo só ------------------------------------
 # A Esportiva Bet vende condições compostas como uma seleção única:
 #   "1x2 e ambas equipes marcam: Vélez Sarsfield e não"
@@ -187,6 +219,10 @@ class Leg:
     # prefixo pra cá antes de parsear o resto. `None` = perna do jogo único da
     # oferta (o caso comum, sem mudança de comportamento).
     evento_texto: str | None = None
+    # Espaço PARALELO ao de `market_key`: só preenchido quando `suportado` é
+    # `False`, e só consumido por `consenso.py`. `fair_odds.py` (o caminho
+    # Pinnacle) nunca lê este campo — ver a nota acima de `ChaveConsenso`.
+    consenso_chave: "ChaveConsenso | None" = None
 
     def __str__(self) -> str:
         if not self.suportado:
@@ -229,6 +265,96 @@ def _limite(texto: str) -> float | None:
     """"18+" -> 17.5. A Betano publica limite inteiro; a Pinnacle, linha .5."""
     m = re.search(r"(\d+)\s*\+\s*$", texto.strip())
     return float(m.group(1)) - 0.5 if m else None
+
+
+# "Cartões do Grêmio Mais de 1.5" -> entidade "Grêmio" depois da palavra do
+# mercado. A ordem das alternativas do lookahead importa: "mais de"/"menos de"
+# tem que vir antes de "over"/"under" só por organização, não é load-bearing.
+_ENTIDADE_APOS_MERCADO = re.compile(
+    r"^(?:do|da|de)\s+(.+?)\s*(?=mais\s+de\b|menos\s+de\b|over\b|under\b"
+    r"|sim\s*$|n(?:ã|a)o\s*$|\d+\s*\+\s*$|$)",
+    re.IGNORECASE)
+
+
+def chave_consenso(texto: str) -> ChaveConsenso | None:
+    """Chave estruturada pra casar uma perna sem cobertura Pinnacle no consenso.
+
+    Só produz chave pra motivos com entrada em `_FAMILIA_POR_MOTIVO` — os
+    mesmos mercados que `SEM_COBERTURA` já verificou contra a API. Motivo sem
+    família, ou 2º tempo (sem mercado equivalente hoje pra estas famílias,
+    mesma armadilha da seção "Períodos" da skill `value-bet-methodology`),
+    devolvem `None`. `None` nunca casa com nada, nem consigo mesmo por `==`
+    dataclass — é a recusa explícita.
+    """
+    texto = texto.strip()
+    if SEGUNDO_TEMPO.search(texto):
+        return None
+    motivo = _sem_cobertura(texto)
+    if motivo is None:
+        return None
+    familia = _FAMILIA_POR_MOTIVO.get(motivo)
+    if familia is None:
+        return None
+
+    periodo = "1t" if PRIMEIRO_TEMPO.search(texto) else "jogo"
+    corpo = _PREFIXO_PERIODO.sub("", texto).strip()
+
+    m_familia = None
+    for padrao, mot in SEM_COBERTURA:
+        if mot != motivo:
+            continue
+        m_familia = re.search(padrao, corpo, re.IGNORECASE)
+        if m_familia:
+            break
+
+    escopo = periodo
+    if m_familia:
+        # Entidade ANTES da palavra do mercado ("Lucas Barbosa Chutes no
+        # gol 1+") é nome de JOGADOR: casas escrevem prop de jogador assim.
+        antes = corpo[: m_familia.start()].strip()
+        antes = re.sub(r"\b(de|do|da)\s*$", "", antes, flags=re.IGNORECASE).strip()
+        if antes and not _NAO_E_TIME.match(antes):
+            # `consenso._normalizar` (não `matcher.normalizar`): este é
+            # normalizador genérico de rótulo, não afinado pra time — o
+            # `RUIDO` de `matcher.normalizar` come "jr"/"junior"/"u\d{2}",
+            # que corromperia nome de jogador. Import tardio: `consenso.py`
+            # importa este módulo no nível de topo (pro casamento canônico),
+            # então importar `consenso` aqui no topo do arquivo formaria
+            # ciclo — em tempo de chamada os dois módulos já terminaram de
+            # carregar.
+            from .consenso import _normalizar as _normalizar_rotulo
+            norm = _normalizar_rotulo(antes)
+            if norm:
+                escopo = f"jogador:{norm}"
+        else:
+            # Entidade DEPOIS, como "do <Time>"/"da <Time>" ("Cartões do
+            # Grêmio Mais de 1.5") é nome de TIME — grafia possessiva comum
+            # nesta família de rótulo.
+            depois = corpo[m_familia.end():].strip()
+            m_time = _ENTIDADE_APOS_MERCADO.match(depois)
+            if m_time and m_time.group(1).strip():
+                norm = normalizar(m_time.group(1).strip())
+                if norm:
+                    escopo = f"time:{norm}"
+
+    lado: str | None
+    valor: float | None
+    linha_info = _linha(corpo)
+    if linha_info:
+        lado, valor = linha_info
+    else:
+        limite = _limite(corpo)
+        if limite is not None:
+            lado, valor = "over", limite
+        else:
+            m_sim = re.search(r"\b(sim|n(?:ã|a)o)\s*$", corpo, re.IGNORECASE)
+            if m_sim:
+                lado = "sim" if m_sim.group(1).lower() == "sim" else "nao"
+                valor = None
+            else:
+                lado, valor = None, None
+
+    return ChaveConsenso(familia=familia, escopo=escopo, lado=lado, linha=valor)
 
 
 # Set escrito por extenso, do jeito da Altenar ("Primeiro set - total jogos").
@@ -915,11 +1041,24 @@ def _parse_resultado(texto: str) -> Leg | None:
 def parse_leg(texto: str) -> Leg:
     """Mapeia uma perna isolada pra um mercado da Pinnacle.
 
+    Fino wrapper em cima de `_parse_leg_pinnacle`: quando a perna sai sem
+    cobertura, anexa `consenso_chave` — sempre DEPOIS do veredito
+    `suportado=False`, nunca antes, e nunca contaminando `market_key`.
+    """
+    texto = texto.strip()
+    leg = _parse_leg_pinnacle(texto)
+    if not leg.suportado:
+        leg.consenso_chave = chave_consenso(texto)
+    return leg
+
+
+def _parse_leg_pinnacle(texto: str) -> Leg:
+    """Mapeia uma perna isolada pra um mercado da Pinnacle.
+
     A ordem dos parsers importa: os de tênis e basquete rodam antes do de
     futebol porque "Vencedor do Set (Set 1) X" casaria com o `vencedor\\b` do
     parser de resultado e viraria um 1X2 de futebol.
     """
-    texto = texto.strip()
 
     motivo = _sem_cobertura(texto)
     if motivo:
