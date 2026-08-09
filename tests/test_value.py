@@ -1176,6 +1176,24 @@ class TestConsenso(unittest.TestCase):
         self.assertEqual(canonico.n_casas, literal.n_casas)
         self.assertEqual(canonico.n_precos, literal.n_precos)
 
+    def test_idade_max_min_reflete_o_preco_mais_velho(self):
+        """`idade_max_min` mede o preço MAIS VELHO que sustenta o consenso, não
+        o mais novo — 5 casas frescas de 10min e 1 de 2h têm 2h de idade real.
+        """
+        agora = datetime.now(timezone.utc)
+        linhas = self._tres_casas()
+        recente = (agora - timedelta(minutes=10)).isoformat()
+        velha = (agora - timedelta(hours=2)).isoformat()
+        for i, linha in enumerate(linhas):
+            # A última casa (índice 10/11, "GingaBet") carrega o preço velho;
+            # as demais são recentes.
+            linha["capturado_em"] = velha if i >= 10 else recente
+
+        r = consenso.calcular(linhas, "Total de cartões 3.5", "Mais de 3.5")
+        self.assertIsNotNone(r)
+        self.assertAlmostEqual(r.idade_max_min, 120, delta=1)
+        self.assertIn("120min", r.prob.mercado)
+
     def test_threshold_de_consenso_e_maior_que_o_de_pinnacle(self):
         """Casa mole pode estar errada junto — o piso tem que subir."""
         self.assertGreater(config.EDGE_MIN_CONSENSO, config.EDGE_MIN_SIMPLES)

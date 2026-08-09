@@ -223,6 +223,18 @@ EDGE_MIN_PROP = float(os.getenv("EDGE_MIN_PROP", "30.0"))
 # o resto é histórico que ninguém lê e a tabela cresce rápido.
 CONSENSO_RETENCAO_HORAS = float(os.getenv("CONSENSO_RETENCAO_HORAS", "12.0"))
 
+# Guarda de sanidade entre as duas constantes acima: janela maior que a
+# retenção é no-op silencioso, porque os dados já foram apagados do banco
+# antes da janela terminar de "abrir" — `mercados_para_consenso` nunca
+# encontraria a diferença. `consenso.ResultadoConsenso.idade_max_min`
+# (Etapa 4) existe pra medir o período real do rodízio via `scrape_runs`
+# antes de decidir alargar `CONSENSO_JANELA_HORAS` — decisão do dono, não
+# tomada aqui.
+assert CONSENSO_JANELA_HORAS <= CONSENSO_RETENCAO_HORAS, (
+    "janela de consenso maior que a retenção é no-op silencioso: "
+    "os dados já foram apagados antes da janela terminar"
+)
+
 # ---------------------------------------------------------------------------
 # Ponte fuzzy evento_id -> pool (Etapa 3): casa não-Altenar (Betano, Novibet,
 # EsportesDaSorte, CasaDeAposta) nunca tem seu `evento_id` no pool, que só as

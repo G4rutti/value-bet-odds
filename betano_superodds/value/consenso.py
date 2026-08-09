@@ -44,6 +44,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from statistics import median
 
 from . import config
@@ -52,6 +53,39 @@ from .market_parser import ChaveConsenso, chave_consenso
 from .models import Market
 
 log = logging.getLogger(__name__)
+
+
+def _parse_capturado(valor: object) -> datetime | None:
+    """`capturado_em` -> `datetime` aware, mesma convenção de `models.to_utc_iso`.
+
+    `Storage._agora_iso` grava com offset (`...+00:00` ou local), então
+    `fromisoformat` direto já basta; o `replace("Z", ...)` cobre o caso raro de
+    algum registro ter vindo de fonte que grava `Z` em vez de offset numérico.
+    """
+    if not valor:
+        return None
+    try:
+        quando = datetime.fromisoformat(str(valor).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if quando.tzinfo is None:
+        quando = quando.astimezone()
+    return quando.astimezone(timezone.utc)
+
+
+def _idade_max_min(capturados: list[str], agora: datetime | None = None) -> int:
+    """Minutos desde o preço MAIS VELHO entre os usados no consenso.
+
+    A mais velha, não a mais nova: é ela que limita o quão fresca a referência
+    de verdade é — um consenso com 5 preços de 2min e 1 de 2h tem 2h de idade
+    real, não 2min.
+    """
+    agora = agora or datetime.now(timezone.utc)
+    datas = [d for d in (_parse_capturado(c) for c in capturados) if d is not None]
+    if not datas:
+        return 0
+    mais_velha = min(datas)
+    return max(0, int((agora - mais_velha).total_seconds() // 60))
 
 
 # Cartão, chute ao gol, artilheiro (gol de jogador) e handicap pedem um
@@ -119,6 +153,12 @@ class ResultadoConsenso:
     # casas com um preço só é uma fonte contada três vezes, e o alerta precisa
     # dizer isso em vez de exibir "3 casas" como se fossem independentes.
     n_precos: int = 0
+    # Minutos desde o preço mais VELHO entre os que sustentam o consenso —
+    # não o mais novo. `CASAS_POR_CICLO` faz o rodízio raspar poucas casas por
+    # vez, então um consenso "fresco" pode estar carregando um preço de horas
+    # atrás sem nada acusar isso hoje. Puramente diagnóstico (ver princípio 2
+    # da skill `value-bet-methodology`: mede, não vira gate sozinho).
+    idade_max_min: int = 0
 
     @property
     def independente(self) -> bool:
@@ -137,8 +177,10 @@ def _par_da_linha(selecao_norm: str) -> tuple[str, str] | None:
     return (m.group(1), m.group(2)) if m else None
 
 
-def _mercados_por_casa(linhas: list[dict], market_nome: str, selecao: str,
-                       excluir_casa: str | None) -> dict[str, Market]:
+def _mercados_por_casa(
+        linhas: list[dict], market_nome: str, selecao: str,
+        excluir_casa: str | None,
+) -> dict[str, tuple[Market, list[str]]]:
     """Monta, por casa, o `Market` que serve de unidade de de-vig.
 
     ⚠️ A unidade NÃO é o `market_id`. Conferido no payload real: um único
@@ -159,6 +201,7 @@ def _mercados_por_casa(linhas: list[dict], market_nome: str, selecao: str,
     par_alvo = _par_da_linha(alvo_sel)
 
     por_mercado: dict[tuple[str, str], dict[str, float]] = {}
+    capturados_por_bloco: dict[tuple[str, str], list[str]] = {}
     for linha in linhas:
         if excluir_casa and linha["casa"] == excluir_casa:
             continue
@@ -175,9 +218,14 @@ def _mercados_por_casa(linhas: list[dict], market_nome: str, selecao: str,
                 continue
         chave = (linha["casa"], str(linha.get("market_id", "")))
         por_mercado.setdefault(chave, {})[sel] = preco
+        cap = linha.get("capturado_em")
+        if cap:
+            capturados_por_bloco.setdefault(chave, []).append(str(cap))
 
     melhor: dict[str, dict[str, float]] = {}
-    for (casa, _mid), outcomes in por_mercado.items():
+    melhor_capturados: dict[str, list[str]] = {}
+    for chave, outcomes in por_mercado.items():
+        casa, _mid = chave
         if alvo_sel not in outcomes or len(outcomes) < 2:
             continue
         # Menos lados = mercado mais específico, não um agregado que contém a
@@ -185,9 +233,11 @@ def _mercados_por_casa(linhas: list[dict], market_nome: str, selecao: str,
         atual = melhor.get(casa)
         if atual is None or len(outcomes) < len(atual):
             melhor[casa] = outcomes
+            melhor_capturados[casa] = capturados_por_bloco.get(chave, [])
 
     return {
-        casa: Market(key="consenso", label=market_nome, outcomes=outcomes)
+        casa: (Market(key="consenso", label=market_nome, outcomes=outcomes),
+               melhor_capturados.get(casa, []))
         for casa, outcomes in melhor.items()
     }
 
@@ -202,7 +252,7 @@ def _chave_da_linha(linha: dict) -> ChaveConsenso | None:
 
 def _mercados_por_casa_canonico(
         linhas: list[dict], chave_alvo: ChaveConsenso, excluir_casa: str | None,
-) -> dict[str, tuple[Market, str]]:
+) -> dict[str, tuple[Market, str, list[str]]]:
     """Mesma unidade de de-vig de `_mercados_por_casa` — o PAR da mesma linha
     (ou o bloco inteiro do `market_id`, quando a seleção não tem linha) —,
     só que casando por `ChaveConsenso` em vez de igualdade de string do nome
@@ -220,6 +270,7 @@ def _mercados_por_casa_canonico(
     pro caminho Pinnacle) e a MESMA linha.
     """
     por_bloco: dict[tuple[str, str], dict[str, tuple[float, str | None]]] = {}
+    capturados_por_bloco: dict[tuple[str, str], list[str]] = {}
     for linha in linhas:
         if excluir_casa and linha["casa"] == excluir_casa:
             continue
@@ -236,10 +287,15 @@ def _mercados_por_casa_canonico(
         sel = _normalizar(linha["selecao"])
         bloco = (linha["casa"], str(linha.get("market_id", "")))
         por_bloco.setdefault(bloco, {})[sel] = (preco, chave_linha.lado)
+        cap = linha.get("capturado_em")
+        if cap:
+            capturados_por_bloco.setdefault(bloco, []).append(str(cap))
 
     melhor: dict[str, dict[str, float]] = {}
     alvo_por_casa: dict[str, str] = {}
-    for (casa, _mid), outcomes in por_bloco.items():
+    melhor_capturados: dict[str, list[str]] = {}
+    for bloco, outcomes in por_bloco.items():
+        casa, _mid = bloco
         alvo_sel = next((sel for sel, (_preco, lado) in outcomes.items()
                          if lado == chave_alvo.lado), None)
         precos = {sel: preco for sel, (preco, _lado) in outcomes.items()}
@@ -251,10 +307,11 @@ def _mercados_por_casa_canonico(
         if atual is None or len(precos) < len(atual):
             melhor[casa] = precos
             alvo_por_casa[casa] = alvo_sel
+            melhor_capturados[casa] = capturados_por_bloco.get(bloco, [])
 
     return {
         casa: (Market(key="consenso", label=chave_alvo.familia, outcomes=outcomes),
-               alvo_por_casa[casa])
+               alvo_por_casa[casa], melhor_capturados.get(casa, []))
         for casa, outcomes in melhor.items()
     }
 
@@ -276,19 +333,23 @@ def calcular(linhas: list[dict], market_nome: str, selecao: str,
     """
     mercados: dict[str, Market] = {}
     alvo_por_casa: dict[str, str] = {}
+    capturados_por_casa: dict[str, list[str]] = {}
     modo_canonico = False
 
     if market_nome:
-        mercados = _mercados_por_casa(linhas, market_nome, selecao, excluir_casa)
-        if mercados:
+        literal = _mercados_por_casa(linhas, market_nome, selecao, excluir_casa)
+        if literal:
+            mercados = {casa: mkt for casa, (mkt, _cap) in literal.items()}
+            capturados_por_casa = {casa: cap for casa, (_mkt, cap) in literal.items()}
             alvo_norm = _normalizar(selecao)
             alvo_por_casa = {casa: alvo_norm for casa in mercados}
 
     if not mercados and chave_alvo is not None:
         canonico = _mercados_por_casa_canonico(linhas, chave_alvo, excluir_casa)
         if canonico:
-            mercados = {casa: mkt for casa, (mkt, _alvo) in canonico.items()}
-            alvo_por_casa = {casa: alvo for casa, (_mkt, alvo) in canonico.items()}
+            mercados = {casa: mkt for casa, (mkt, _alvo, _cap) in canonico.items()}
+            alvo_por_casa = {casa: alvo for casa, (_mkt, alvo, _cap) in canonico.items()}
+            capturados_por_casa = {casa: cap for casa, (_mkt, _alvo, cap) in canonico.items()}
             modo_canonico = True
 
     if not mercados:
@@ -296,6 +357,7 @@ def calcular(linhas: list[dict], market_nome: str, selecao: str,
 
     probs: list[float] = []
     casas: list[str] = []
+    capturados: list[str] = []
     for casa, market in sorted(mercados.items()):
         # `remover_vig` já recusa mercado incompleto e margem implausível — é a
         # mesma guarda usada na Pinnacle, e é ela que tira do consenso a casa
@@ -306,6 +368,7 @@ def calcular(linhas: list[dict], market_nome: str, selecao: str,
             continue
         probs.append(justas[alvo].probabilidade)
         casas.append(casa)
+        capturados.extend(capturados_por_casa.get(casa, []))
 
     # Cartão/chute ao gol/artilheiro/handicap pedem mais casas que o consenso
     # genérico — são a classe mais fraca da tabela de confiança, sem a
@@ -333,6 +396,7 @@ def calcular(linhas: list[dict], market_nome: str, selecao: str,
     # uma fonte só replicada. Arredonda antes de contar — diferença na quarta
     # casa decimal é ruído de arredondamento da API, não opinião diferente.
     n_precos = len({round(x, 4) for x in probs})
+    idade = _idade_max_min(capturados)
 
     rotulo_mercado = (market_nome if not modo_canonico
                       else f"{chave_alvo.familia}:{chave_alvo.escopo}")
@@ -344,12 +408,14 @@ def calcular(linhas: list[dict], market_nome: str, selecao: str,
             # A margem individual já foi removida casa a casa; o que sobra aqui
             # é dispersão entre casas, não overround. Zero é a resposta honesta.
             overround=0.0,
-            mercado=f"{rotulo_mercado} ({len(probs)} casas, {n_precos} preço(s)){sufixo}",
+            mercado=(f"{rotulo_mercado} ({len(probs)} casas, {n_precos} "
+                     f"preço(s), até {idade}min){sufixo}"),
             consenso=True,
         ),
         n_casas=len(probs),
         casas=casas,
         n_precos=n_precos,
+        idade_max_min=idade,
     )
 
 
