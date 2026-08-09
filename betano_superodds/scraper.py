@@ -30,7 +30,7 @@ from curl_cffi import requests as curl_requests
 from curl_cffi.requests.exceptions import RequestException
 
 from . import config
-from .models import Offer, millis_to_iso
+from .models import MercadoCasa, Offer, millis_to_iso, to_utc_iso
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +89,14 @@ class BetanoScraper:
         self._session = session
         self._owns_session = session is None
         self._semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY)
+        # Mercados COMPLETOS vistos nesta visita, matéria prima do consenso.
+        # Mesmo padrão de `esportiva.EsportivaScraper.mercados_vistos`: acumulado
+        # aqui (não devolvido por `scrape`, que é `list[Offer]` em todo scraper) e
+        # lido depois por quem orquestra (`main.coletar`). Seguro sob
+        # `asyncio.gather` porque `list.append`/`+=` entre `await`s não cede o
+        # controle no meio da operação — cada chamada de `_build_mr12_offers`
+        # termina sua própria escrita antes do event loop trocar de tarefa.
+        self.mercados_vistos: list[MercadoCasa] = []
 
     async def __aenter__(self) -> "BetanoScraper":
         if self._session is None:
@@ -158,6 +166,7 @@ class BetanoScraper:
         event_url = event.get("url") or ""
         originals: dict[str, float] = {}
         confirmed = False
+        detail: dict | None = None
 
         if event_url:
             try:
@@ -182,6 +191,15 @@ class BetanoScraper:
         # decide "faltam X minutos pro jogo" precisa do kickoff cru.
         inicio_evento = millis_to_iso(event.get("startTime"))
         full_url = f"{config.BASE_URL}{event_url}" if event_url else config.BASE_URL
+
+        # O mesmo `detail` que só serviu pra achar a odd original do MRES já
+        # tem TODOS os mercados do evento (`_find_markets` é um walker
+        # recursivo genérico, sem filtro de tipo). Não custa request novo —
+        # só deixa de descartar o que já foi buscado.
+        if detail is not None:
+            self.mercados_vistos += self._mercados_do_detalhe(
+                detail, event, evento, inicio_evento
+            )
 
         offers: list[Offer] = []
         for selection in listing_market.get("selections") or []:
@@ -228,6 +246,82 @@ class BetanoScraper:
             break
 
         return originals, confirmed
+
+    @staticmethod
+    def _mercados_do_detalhe(
+        detail: dict, event: dict, evento: str | None, inicio_evento: str | None
+    ) -> list[MercadoCasa]:
+        """Todos os mercados do evento, com todas as seleções e preços.
+
+        Mesmo `detail` de `_extract_originals`, sem o filtro `type != MRES` e
+        sem o `break` no primeiro mercado — só deixa de descartar o resto do
+        payload. É a única escrita em `mercados_casa` de fora do feed Altenar
+        (ver `esportiva._mercados_do_detalhe`, o molde deste método), e por
+        isso a única fonte de preço genuinamente independente do pool.
+
+        Verificado ao vivo em 2026-08-09 (evento Bahia-Vasco, `/odds/...`):
+        - o nome humano do mercado é `market.get("name")` (`"marketName"` não
+          existe no payload real);
+        - `market.get("id")` é estável e único por mercado — vira `market_id`;
+        - `selection.get("name")` já é o texto pronto ("Mais de 4.5", "Sim",
+          "Não"); `fullName` só vem preenchido no MRES (nome completo do
+          time), daí o fallback `fullName or name` (mesmo padrão de
+          `_build_mr12_offers:191`);
+        - um mercado como "Total de Cartões" agrupa VÁRIAS linhas (3.5, 4.5,
+          5.5) sob o mesmo `market_id` — o de-vig por linha é responsabilidade
+          de quem consome (`value/consenso.py`), não deste writer;
+        - mercados de artilheiro/placar exato (`PLST`, `PSCR`, `FHMR`) vêm com
+          `selections` vazio (usam `scorerSelections`/`exactScoreSelections`
+          à parte) — a guarda de `< 2` seleções válidas já os descarta.
+
+        Mesmas guardas do writer Altenar: seleção com `preco is None` ou
+        `preco <= 1.0` é descartada, e mercado com menos de duas seleções
+        válidas não serve pra de-vig.
+        """
+        data = detail.get("data") or {}
+        evento_id = str(event.get("id"))
+        liga = event.get("leagueName")
+        inicio_utc = to_utc_iso(inicio_evento)
+
+        saida: list[MercadoCasa] = []
+        for market in _find_markets(data):
+            market_id = market.get("id")
+            nome_mkt = market.get("name")
+            if market_id is None or not nome_mkt:
+                continue
+
+            validas: list[tuple[str, float]] = []
+            for selection in market.get("selections") or []:
+                nome_sel = selection.get("fullName") or selection.get("name")
+                preco = selection.get("price")
+                if not nome_sel or preco is None:
+                    continue
+                try:
+                    preco = float(preco)
+                except (TypeError, ValueError):
+                    continue
+                if preco <= 1.0:
+                    continue
+                validas.append((str(nome_sel), preco))
+
+            if len(validas) < 2:
+                continue
+
+            saida += [
+                MercadoCasa(
+                    casa="Betano",
+                    evento_id=evento_id,
+                    market_id=str(market_id),
+                    market_nome=str(nome_mkt),
+                    selecao=nome_sel,
+                    preco=preco,
+                    evento=evento,
+                    inicio_evento=inicio_utc,
+                    liga=liga,
+                )
+                for nome_sel, preco in validas
+            ]
+        return saida
 
     # ------------------------------------------------------------------
     # Fonte 2: smart-picks (combos turbinados)
@@ -289,6 +383,11 @@ class BetanoScraper:
 
         Erra só se *tudo* falhar — uma fonte quebrada não derruba as outras.
         """
+        # `scraper` é reaproveitado entre ciclos (`main.py` abre um só, no
+        # `while True`) — sem resetar aqui, `mercados_vistos` cresceria sem
+        # teto e regravaria os mercados de ciclos antigos a cada visita.
+        self.mercados_vistos = []
+
         tasks: list[asyncio.Future] = []
         labels: list[str] = []
 

@@ -154,7 +154,10 @@ async def coletar(
 
     raspadas = {"Betano"}
     escopo: set[tuple[str, str]] = set()
-    mercados: list = []
+    # A Betano é a única fonte de preço fora do feed Altenar: as 11 casas
+    # Altenar são medidamente um feed só (90,3% de preços idênticos), então
+    # isto é o que dá independência real ao consenso.
+    mercados: list = list(scraper.mercados_vistos)
 
     if config.ENABLE_CASADEAPOSTA:
         tc = time.monotonic()
