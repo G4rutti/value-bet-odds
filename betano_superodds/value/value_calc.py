@@ -132,7 +132,8 @@ def threshold_para(tipo_mercado: str,
 
 def classificar_confianca(tipo_mercado: str, fonte_odd: str = "pinnacle",
                           classe_mercado: str = "geral",
-                          n_casas_consenso: int = 0) -> str:
+                          n_casas_consenso: int = 0,
+                          n_precos_consenso: int = 0) -> str:
     """"alta" / "média-alta" / "média" / "baixa" / "insuficiente".
 
     `n_casas_consenso` é uma segunda checagem, não a principal — o gate de
@@ -144,6 +145,15 @@ def classificar_confianca(tipo_mercado: str, fonte_odd: str = "pinnacle",
     ao lado de uma perna "prop" (mínimo 6) resulta em `n_casas_consenso=5` e
     `classe_mercado="prop"`, que é insuficiente para prop mesmo sem nenhum
     gate individual ter falhado. Ver o relatório do agente pra mais contexto.
+
+    `n_precos_consenso` é uma TERCEIRA checagem, ortogonal às duas acima e
+    sobre outra dimensão: qualidade, não quantidade. Casas Altenar são um
+    feed só — ~90% das seleções saem com preço idêntico entre elas, então
+    `n_casas_consenso` alto pode esconder um único preço rebanhado (ver
+    `consenso.calcular`, que já calcula `n_precos` por isso). O gate
+    PRINCIPAL de quantidade de casas continua lá; isto aqui rebaixa a
+    confiança quando o consenso, apesar de aprovado em quantidade, não tem
+    diversidade de preço nenhuma.
     """
     if fonte_odd == "consenso":
         minimo = (config.CONSENSO_MIN_CASAS_PROP if classe_mercado == "prop"
@@ -151,8 +161,13 @@ def classificar_confianca(tipo_mercado: str, fonte_odd: str = "pinnacle",
         if n_casas_consenso and n_casas_consenso < minimo:
             return "insuficiente"
         if classe_mercado == "prop":
+            if 0 < n_precos_consenso <= 1:
+                return "insuficiente"
             return "baixa"
-        return "baixa" if tipo_mercado == "combo" else "média"
+        resultado = "baixa" if tipo_mercado == "combo" else "média"
+        if resultado == "média" and n_precos_consenso > 0 and n_precos_consenso <= 1:
+            return "baixa"
+        return resultado
     if fonte_odd == "modelo":
         # A tabela do dono não lista "modelo" como fonte — é uma extensão
         # deste agente. Modelo nunca foi preço observado em lugar nenhum (é
@@ -178,12 +193,13 @@ def avaliar_value(odd_boost: float, odd_justa: float, tipo_mercado: str,
                   edge_min_combo: float | None = None,
                   fonte_odd: str = "pinnacle",
                   classe_mercado: str = "geral",
-                  n_casas_consenso: int = 0) -> ValueResult:
+                  n_casas_consenso: int = 0,
+                  n_precos_consenso: int = 0) -> ValueResult:
     edge = calcular_edge(odd_boost, odd_justa)
     limite = threshold_para(tipo_mercado, edge_min_simples, edge_min_combo,
                             fonte_odd, classe_mercado)
     confianca = classificar_confianca(tipo_mercado, fonte_odd, classe_mercado,
-                                      n_casas_consenso)
+                                      n_casas_consenso, n_precos_consenso)
 
     # Teto de sanidade: edge alto demais é sintoma de bug de casamento antes
     # de ser oportunidade (ver EDGE_TETO_SANIDADE em config.py — o falso

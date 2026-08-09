@@ -170,7 +170,8 @@ def avaliar_oferta(oferta: dict, matchups: list[Matchup],
     value = avaliar_value(odd_boost, fair.odd_justa, fair.tipo_mercado,
                           fonte_odd=fair.fonte_odd,
                           classe_mercado=classe_mercado,
-                          n_casas_consenso=fair.n_casas_consenso)
+                          n_casas_consenso=fair.n_casas_consenso,
+                          n_precos_consenso=fair.n_precos_consenso)
 
     # 5. quanto apostar. `confianca`/`flag` decidem a fração de Kelly (ou
     # zeram o stake automático, sem sugestão nenhuma) — ver value_calc.py.

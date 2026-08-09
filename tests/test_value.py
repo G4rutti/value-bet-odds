@@ -2121,6 +2121,42 @@ class TestTabelaDeConfianca(unittest.TestCase):
             classificar_confianca("simples", "consenso", n_casas_consenso=2),
             "insuficiente")
 
+    def test_prop_com_6_casas_mas_1_preco_e_insuficiente(self):
+        """6 casas passam no gate de quantidade, mas se todas cotam o mesmo
+        preço (rebanho Altenar) o consenso não existe de verdade — prop é a
+        classe mais fina da tabela, então nem "baixa" se sustenta aqui."""
+        self.assertEqual(
+            classificar_confianca("simples", "consenso", classe_mercado="prop",
+                                  n_casas_consenso=6, n_precos_consenso=1),
+            "insuficiente")
+
+    def test_prop_com_6_casas_e_3_precos_continua_baixa(self):
+        """Diversidade de preço real (3 preços distintos) não rebaixa mais
+        do que a tabela já prevê pra prop: continua "baixa", igual hoje."""
+        self.assertEqual(
+            classificar_confianca("simples", "consenso", classe_mercado="prop",
+                                  n_casas_consenso=6, n_precos_consenso=3),
+            "baixa")
+
+    def test_geral_com_5_casas_mas_1_preco_cai_de_media_para_baixa(self):
+        """5 casas bastam pro gate de quantidade, mas 1 preço só é rebanho:
+        a "média" que a tabela daria vira "baixa" porque não houve consenso
+        de preço nenhum, só repetição do mesmo feed Altenar."""
+        self.assertEqual(
+            classificar_confianca("simples", "consenso", n_casas_consenso=5,
+                                  n_precos_consenso=1),
+            "baixa")
+
+    def test_geral_com_5_casas_e_3_precos_continua_media(self):
+        """Chamada equivalente à de hoje (sem indício de rebanho) continua
+        dando "média" — n_precos_consenso=0 (default) é o "desligado"
+        natural, e aqui a diversidade real de preço confirma que não há
+        rebaixamento a fazer."""
+        self.assertEqual(
+            classificar_confianca("simples", "consenso", n_casas_consenso=5,
+                                  n_precos_consenso=3),
+            "média")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
