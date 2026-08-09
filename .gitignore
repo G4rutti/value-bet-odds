@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.db
+.venv/
+
+# Token do bot mora aqui. Nunca comitar.
+.env
+
+# Log do supervisor do Windows (bot.bat), um arquivo por dia.
+logs/
