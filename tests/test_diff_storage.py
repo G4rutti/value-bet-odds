@@ -14,7 +14,7 @@ from pathlib import Path
 
 from betano_superodds import config
 from betano_superodds.diff import diff_offers
-from betano_superodds.models import Offer, minutos_ate_inicio, to_utc_iso
+from betano_superodds.models import MercadoCasa, Offer, minutos_ate_inicio, to_utc_iso
 from betano_superodds.storage import Storage
 
 
@@ -328,6 +328,109 @@ class TestStorage(unittest.TestCase):
         # Um ciclo bom zera o contador.
         self.storage.record_run(ofertas=7, novas=7)
         self.assertEqual(self.storage.consecutive_failed_runs(), 0)
+
+
+class TestIdentidadeMercadosCasa(unittest.TestCase):
+    """`mercados_casa` ganha nome/kickoff/liga — pré-requisito da ponte fuzzy
+    que vai casar `evento_id` de casas não-Altenar (Etapa 3, futura).
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.storage = Storage(Path(self._tmp.name) / "test.db")
+
+    def tearDown(self):
+        self.storage.close()
+        self._tmp.cleanup()
+
+    def test_migracao_cria_colunas_em_banco_antigo(self):
+        """Banco existente sem as três colunas novas não pode quebrar na
+        abertura, e a linha antiga tem que sobreviver com NULL nelas."""
+        caminho = Path(self._tmp.name) / "antigo_mercados.db"
+        antigo = sqlite3.connect(caminho)
+        antigo.execute("""
+            CREATE TABLE mercados_casa (
+                casa TEXT NOT NULL, evento_id TEXT NOT NULL, market_id TEXT NOT NULL,
+                market_nome TEXT NOT NULL, selecao TEXT NOT NULL, preco REAL NOT NULL,
+                capturado_em TEXT NOT NULL,
+                PRIMARY KEY (casa, evento_id, market_id, selecao))
+        """)
+        antigo.execute(
+            "INSERT INTO mercados_casa VALUES "
+            "('Esportiva', '1', '10', 'Total de cartões', 'Mais de 3.5', 1.9, ?)",
+            (daqui(-1),))
+        antigo.commit()
+        antigo.close()
+
+        with Storage(caminho) as storage:
+            colunas = {r["name"] for r in
+                      storage._conn.execute("PRAGMA table_info(mercados_casa)")}
+            self.assertTrue({"evento", "inicio_evento", "liga"} <= colunas)
+
+            row = storage._conn.execute(
+                "SELECT * FROM mercados_casa WHERE evento_id = '1'").fetchone()
+            self.assertIsNone(row["evento"])
+            self.assertIsNone(row["inicio_evento"])
+            self.assertIsNone(row["liga"])
+            # Colunas antigas não podem ter sido perdidas na migração.
+            self.assertEqual(row["market_nome"], "Total de cartões")
+            self.assertEqual(row["preco"], 1.9)
+
+    def test_salvar_mercados_casa_grava_identidade(self):
+        m = MercadoCasa(casa="Esportiva", evento_id="1", market_id="10",
+                        market_nome="Total de cartões", selecao="Mais de 3.5",
+                        preco=1.9, evento="Flamengo - Palmeiras",
+                        inicio_evento=daqui(3), liga="Brasileirão")
+        self.storage.salvar_mercados_casa([m])
+
+        row = self.storage._conn.execute(
+            "SELECT * FROM mercados_casa WHERE evento_id = '1'").fetchone()
+        self.assertEqual(row["evento"], "Flamengo - Palmeiras")
+        self.assertEqual(row["liga"], "Brasileirão")
+        self.assertIsNotNone(row["inicio_evento"])
+
+    def test_mercados_para_consenso_devolve_identidade_e_capturado_em(self):
+        m = MercadoCasa(casa="Esportiva", evento_id="1", market_id="10",
+                        market_nome="Total de cartões", selecao="Mais de 3.5",
+                        preco=1.9, evento="Flamengo - Palmeiras",
+                        inicio_evento=daqui(3), liga="Brasileirão")
+        self.storage.salvar_mercados_casa([m])
+
+        linhas = self.storage.mercados_para_consenso("1", janela_horas=3.0)
+        self.assertEqual(len(linhas), 1)
+        linha = linhas[0]
+        for campo in ("capturado_em", "evento", "inicio_evento", "liga"):
+            self.assertIn(campo, linha)
+        self.assertEqual(linha["evento"], "Flamengo - Palmeiras")
+        self.assertEqual(linha["liga"], "Brasileirão")
+
+    def test_eventos_do_pool_uma_linha_por_evento_dentro_da_janela(self):
+        dentro = MercadoCasa(casa="Esportiva", evento_id="1", market_id="10",
+                             market_nome="Total de cartões", selecao="Mais de 3.5",
+                             preco=1.9, evento="Flamengo - Palmeiras",
+                             inicio_evento=daqui(3), liga="Brasileirão")
+        # Mesmo evento_id, outra seleção — não pode virar duas linhas.
+        dentro_outra_selecao = MercadoCasa(
+            casa="Esportiva", evento_id="1", market_id="10",
+            market_nome="Total de cartões", selecao="Menos de 3.5",
+            preco=1.95, evento="Flamengo - Palmeiras",
+            inicio_evento=daqui(3), liga="Brasileirão")
+        fora_da_janela = MercadoCasa(
+            casa="Esportiva", evento_id="2", market_id="10",
+            market_nome="Total de cartões", selecao="Mais de 3.5",
+            preco=1.9, evento="Grêmio - Internacional",
+            inicio_evento=daqui(3), liga="Brasileirão",
+            capturado_em=daqui(-10))
+        sem_evento = MercadoCasa(casa="Esportiva", evento_id="3", market_id="10",
+                                 market_nome="Total de cartões", selecao="Mais de 3.5",
+                                 preco=1.9, evento=None, inicio_evento=None, liga=None)
+        self.storage.salvar_mercados_casa(
+            [dentro, dentro_outra_selecao, fora_da_janela, sem_evento])
+
+        eventos = self.storage.eventos_do_pool(janela_horas=3.0)
+        self.assertEqual([e["evento_id"] for e in eventos], ["1"])
+        self.assertEqual(eventos[0]["evento"], "Flamengo - Palmeiras")
+        self.assertEqual(eventos[0]["liga"], "Brasileirão")
 
 
 class TestFilaPorUrgencia(unittest.TestCase):

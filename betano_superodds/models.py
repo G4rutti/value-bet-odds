@@ -117,6 +117,13 @@ class MercadoCasa:
     selecao: str
     preco: float
     capturado_em: str = field(default_factory=_now_iso)
+    # Identidade do evento — nome, kickoff (ISO UTC) e liga. `None` por
+    # default: quem grava sem preenchê-los (não deveria haver ninguém, mas se
+    # houver) não quebra. Sem isto o `evento_id` do pool não casa com o de
+    # outra casa (ver comentário de `mercados_casa` em `storage.SCHEMA`).
+    evento: str | None = None
+    inicio_evento: str | None = None
+    liga: str | None = None
 
     def to_row(self) -> dict[str, Any]:
         return {
@@ -127,6 +134,9 @@ class MercadoCasa:
             "selecao": self.selecao,
             "preco": self.preco,
             "capturado_em": self.capturado_em,
+            "evento": self.evento,
+            "inicio_evento": self.inicio_evento,
+            "liga": self.liga,
         }
 
 

@@ -66,7 +66,7 @@ from curl_cffi import requests as curl_requests
 from curl_cffi.requests.exceptions import RequestException
 
 from . import config
-from .models import MercadoCasa, Offer, millis_to_iso, minutos_ate_inicio
+from .models import MercadoCasa, Offer, millis_to_iso, minutos_ate_inicio, to_utc_iso
 from .scraper import ScraperError
 
 log = logging.getLogger(__name__)
@@ -311,10 +311,29 @@ class EsportivaScraper:
         d = await self._get("/GetEventDetails", eventId=ev_id)
         # Colhe os mercados completos ANTES de filtrar por boost: é a matéria
         # prima do consenso, e vale mesmo em evento que não tem boost nenhum.
-        self.mercados_vistos += self._mercados_do_detalhe(d, ev_id)
+        self.mercados_vistos += self._mercados_do_detalhe(d, ev_id, ligas)
         return self._ofertas_do_detalhe(d, ev_id, ligas)
 
-    def _mercados_do_detalhe(self, d: dict, ev_id: int) -> list[MercadoCasa]:
+    @staticmethod
+    def _identidade_evento(d: dict, ligas: dict[int, str]
+                           ) -> tuple[str | None, str | None, str | None]:
+        """Nome, kickoff (ISO UTC) e liga do evento — do MESMO payload `d`.
+
+        Compartilhado por `_ofertas_do_detalhe` e `_mercados_do_detalhe` de
+        propósito: se as duas normalizassem o nome de jeitos diferentes (por
+        exemplo uma tratando " vs. " como separador e a outra não), a ponte
+        fuzzy de uma etapa futura compararia texto que a tabela `offers` nunca
+        produz — e isso não dá erro nenhum, só casa errado.
+        """
+        nome = d.get("name")
+        evento = (str(nome).replace(" vs. ", " - ").replace(" vs ", " - ")
+                  if nome else None)
+        liga = (d.get("champ") or {}).get("name") or ligas.get(d.get("champId")) or None
+        inicio_evento = to_utc_iso(d.get("startDate"))
+        return evento, inicio_evento, liga
+
+    def _mercados_do_detalhe(self, d: dict, ev_id: int,
+                             ligas: dict[int, str]) -> list[MercadoCasa]:
         """Todos os mercados do evento, com todas as seleções e preços.
 
         O payload já traz isso e o parser jogava fora: só as seleções citadas
@@ -332,6 +351,7 @@ class EsportivaScraper:
         Mercado com menos de dois lados é descartado: não serve pra de-vig.
         """
         odds = {o["id"]: o for o in d.get("odds") or []}
+        evento, inicio_evento, liga = self._identidade_evento(d, ligas)
         saida: list[MercadoCasa] = []
 
         for src in ("markets", "childMarkets"):
@@ -372,6 +392,9 @@ class EsportivaScraper:
                         market_nome=str(nome_mkt),
                         selecao=nome,
                         preco=preco,
+                        evento=evento,
+                        inicio_evento=inicio_evento,
+                        liga=liga,
                     )
                     for nome, preco in selecoes
                 ]
@@ -386,8 +409,8 @@ class EsportivaScraper:
         if not boosts:
             return []
 
-        evento = str(d.get("name", "")).replace(" vs. ", " - ").replace(" vs ", " - ")
-        liga = (d.get("champ") or {}).get("name") or ligas.get(d.get("champId"), "")
+        evento, inicio_evento, liga = self._identidade_evento(d, ligas)
+        evento = evento or ""
         mercados = {m["id"]: m for m in d.get("markets") or []}
         odds = {o["id"]: o for o in d.get("odds") or []}
 
@@ -434,12 +457,12 @@ class EsportivaScraper:
                 odd_original=float(original),
                 odd_boost=float(turbinada),
                 url=f"{self.casa.site}/sports/event/{ev_id}",
-                liga=liga or None,
+                liga=liga,
                 valido_ate=_iso(info.get("endDate") or d.get("startDate")),
                 # Só `startDate`. O `endDate` do boost é o fim da PROMOÇÃO e
                 # pode cair antes ou depois do apito — usá-lo como kickoff
                 # erra nos dois sentidos.
-                inicio_evento=_iso(d.get("startDate")),
+                inicio_evento=inicio_evento,
                 boost_pct=round((turbinada / original - 1) * 100, 1),
                 limite_aposta=_num(info.get("betsLimit")),
             ))

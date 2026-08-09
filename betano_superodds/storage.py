@@ -116,6 +116,14 @@ CREATE TABLE IF NOT EXISTS mercados_casa (
     selecao       TEXT NOT NULL,
     preco         REAL NOT NULL,
     capturado_em  TEXT NOT NULL,
+    -- Identidade do evento (nome, kickoff ISO UTC, liga), pro casamento
+    -- fuzzy com o `evento_id` de outra casa (Etapa 3 do plano de cobertura).
+    -- Sem isto só 42 dos 546 eventos do pool tinham nome recuperável via
+    -- `offers`. Colunas em SCHEMA porque banco NOVO já nasce com elas; banco
+    -- existente ganha via `_migrar` (ver comentário lá — índice novo também).
+    evento        TEXT,
+    inicio_evento TEXT,
+    liga          TEXT,
     PRIMARY KEY (casa, evento_id, market_id, selecao)
 );
 
@@ -281,6 +289,26 @@ class Storage:
             self._conn.execute(
                 "ALTER TABLE alertas_enviados ADD COLUMN confianca TEXT")
 
+        mercados_casa = {r["name"] for r in
+                         self._conn.execute("PRAGMA table_info(mercados_casa)")}
+        if mercados_casa and "evento" not in mercados_casa:
+            # Sem default: NULL é a resposta honesta pras linhas gravadas antes
+            # da coluna existir — não dá pra recuperar o nome do evento delas,
+            # e elas se renovam sozinhas (retenção de 12h). Mesmo raciocínio de
+            # `limite_aposta` acima.
+            self._conn.execute("ALTER TABLE mercados_casa ADD COLUMN evento TEXT")
+        if mercados_casa and "inicio_evento" not in mercados_casa:
+            self._conn.execute(
+                "ALTER TABLE mercados_casa ADD COLUMN inicio_evento TEXT")
+        if mercados_casa and "liga" not in mercados_casa:
+            self._conn.execute("ALTER TABLE mercados_casa ADD COLUMN liga TEXT")
+        # Fora do SCHEMA pelo mesmo motivo do índice de `offers` acima: num
+        # banco que já existia, a coluna `evento` só nasce no ALTER logo
+        # acima, e um CREATE INDEX antes dele quebraria a abertura do banco.
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mercados_casa_evento"
+            " ON mercados_casa(capturado_em, evento_id)")
+
     def close(self) -> None:
         self._conn.close()
 
@@ -312,9 +340,9 @@ class Storage:
                 """
                 REPLACE INTO mercados_casa
                     (casa, evento_id, market_id, market_nome, selecao, preco,
-                     capturado_em)
+                     capturado_em, evento, inicio_evento, liga)
                 VALUES (:casa, :evento_id, :market_id, :market_nome, :selecao,
-                        :preco, :capturado_em)
+                        :preco, :capturado_em, :evento, :inicio_evento, :liga)
                 """,
                 [m.to_row() for m in mercados],
             )
@@ -332,11 +360,33 @@ class Storage:
                  ).astimezone().isoformat(timespec="seconds")
         rows = self._conn.execute(
             """
-            SELECT casa, market_id, market_nome, selecao, preco
+            SELECT casa, market_id, market_nome, selecao, preco, capturado_em,
+                   evento, inicio_evento, liga
               FROM mercados_casa
              WHERE evento_id = ? AND capturado_em >= ?
             """,
             (str(evento_id), corte),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def eventos_do_pool(self, janela_horas: float) -> list[dict]:
+        """Uma linha por `evento_id` distinto do pool, com nome/kickoff/liga.
+
+        Matéria-prima da ponte fuzzy (Etapa 3, futura): sem nome de evento não
+        há contra o que casar uma oferta de casa não-Altenar. Só entram linhas
+        com `evento` preenchido — os registros antigos (gravados antes desta
+        coluna existir) ficam de fora até se renovarem sozinhos.
+        """
+        corte = (datetime.now(timezone.utc) - timedelta(hours=janela_horas)
+                 ).astimezone().isoformat(timespec="seconds")
+        rows = self._conn.execute(
+            """
+            SELECT evento_id, evento, inicio_evento, liga
+              FROM mercados_casa
+             WHERE evento IS NOT NULL AND capturado_em >= ?
+             GROUP BY evento_id
+            """,
+            (corte,),
         ).fetchall()
         return [dict(r) for r in rows]
 

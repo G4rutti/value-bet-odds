@@ -1074,6 +1074,30 @@ class TestMercadosParaConsenso(unittest.TestCase):
                       if x.market_nome == "Total de escanteios"]
         self.assertEqual(len({x.market_id for x in escanteios}), 2)
 
+    def test_grava_identidade_do_evento(self):
+        """Nome/kickoff/liga são o que permite casar este `evento_id` com o
+        de uma casa não-Altenar (ponte fuzzy, etapa futura). Sem isto só uma
+        fração dos eventos do pool tinha nome recuperável."""
+        um = self._mercados()[0]
+        self.assertEqual(um.evento, "Athletico-PR - Vitória")
+        self.assertEqual(um.liga, "Copa do Brasil")
+        self.assertIsNotNone(um.inicio_evento)
+
+    def test_identidade_bate_com_a_da_oferta_correspondente(self):
+        """`_ofertas_do_detalhe` e `_mercados_do_detalhe` compartilham o mesmo
+        helper de propósito: se normalizassem o nome de jeitos diferentes, a
+        ponte fuzzy compararia texto que `offers` nunca produz."""
+        ofertas = self._rodar_ofertas()
+        mercado = self._mercados()[0]
+        boost = next(o for o in ofertas if o.fonte == self.casa_boost)
+        self.assertEqual(mercado.evento, boost.evento)
+        self.assertEqual(mercado.liga, boost.liga)
+
+    def _rodar_ofertas(self):
+        sc = ScraperFake(listagem(), detalhe())
+        self.casa_boost = sc.casa.fonte_boost
+        return asyncio.run(sc._scrape_esporte(66))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
