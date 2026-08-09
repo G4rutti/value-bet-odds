@@ -1200,6 +1200,56 @@ class TestConsenso(unittest.TestCase):
         self.assertEqual(threshold_para("simples", fonte_odd="consenso"),
                          config.EDGE_MIN_CONSENSO)
 
+    def test_familia_da_casa(self):
+        """Altenar vira `"altenar"`, Betano vira `"betano"`, o resto é ela
+        mesma — não hardcoda casa nenhuma futura."""
+        self.assertEqual(consenso._familia_da_casa("VaiDeBet"), "altenar")
+        self.assertEqual(consenso._familia_da_casa("EstrelaBet"), "altenar")
+        self.assertEqual(consenso._familia_da_casa("Betano"), "betano")
+        self.assertEqual(consenso._familia_da_casa("CasaFutura"), "CasaFutura")
+
+    def test_defaults_de_familia_nao_mudam_comportamento_de_hoje(self):
+        """Regressão explícita: com `CONSENSO_MIN_PRECOS=1` e
+        `CONSENSO_MIN_FAMILIAS=1` (os defaults), um cenário que já formava
+        consenso antes desta etapa continua formando exatamente igual —
+        mesmo sendo 6 casas Altenar (1 família só)."""
+        r = consenso.calcular(self._tres_casas(), "Total de cartões 3.5",
+                              "Mais de 3.5")
+        self.assertIsNotNone(r)
+        self.assertEqual(r.n_casas, 6)
+        self.assertEqual(r.n_familias, 1)
+        self.assertIn("1 família(s)", r.prob.mercado)
+
+    def test_gate_de_familias_recusa_so_altenar(self):
+        """6 casas, todas Altenar: `CONSENSO_MIN_FAMILIAS=2` recusa o
+        consenso inteiro mesmo com casas de sobra, porque é 1 família só."""
+        original = config.CONSENSO_MIN_FAMILIAS
+        try:
+            config.CONSENSO_MIN_FAMILIAS = 2
+            r = consenso.calcular(self._tres_casas(), "Total de cartões 3.5",
+                                  "Mais de 3.5")
+            self.assertIsNone(r)
+        finally:
+            config.CONSENSO_MIN_FAMILIAS = original
+
+    def test_gate_de_familias_aceita_com_betano_no_meio(self):
+        """Mesmo cenário, mas trocando uma casa Altenar por Betano: 2
+        famílias (altenar + betano) satisfazem `CONSENSO_MIN_FAMILIAS=2`."""
+        original = config.CONSENSO_MIN_FAMILIAS
+        try:
+            config.CONSENSO_MIN_FAMILIAS = 2
+            linhas = (_linhas_casa("VaiDeBet", 1.90, 1.90)
+                      + _linhas_casa("EstrelaBet", 1.95, 1.85)
+                      + _linhas_casa("vupi", 1.88, 1.92)
+                      + _linhas_casa("BateuBet", 1.92, 1.88)
+                      + _linhas_casa("4Play", 1.87, 1.93)
+                      + _linhas_casa("Betano", 1.93, 1.87))
+            r = consenso.calcular(linhas, "Total de cartões 3.5", "Mais de 3.5")
+            self.assertIsNotNone(r)
+            self.assertEqual(r.n_familias, 2)
+        finally:
+            config.CONSENSO_MIN_FAMILIAS = original
+
 
 class TestConsensoNoPipeline(unittest.TestCase):
     """Fim a fim: prop que hoje morre em `sem cobertura` vira oferta avaliada."""

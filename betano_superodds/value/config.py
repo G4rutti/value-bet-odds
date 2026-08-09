@@ -166,6 +166,31 @@ CONSENSO_MIN_CASAS = int(os.getenv("CONSENSO_MIN_CASAS", "5"))
 # sobe em relação ao consenso genérico (`CONSENSO_MIN_CASAS`).
 CONSENSO_MIN_CASAS_PROP = int(os.getenv("CONSENSO_MIN_CASAS_PROP", "6"))
 
+# Gate de INDEPENDÊNCIA DE FEED — desligado por padrão (default 1 = qualquer
+# consenso formado hoje continua formando, sem mudança de comportamento).
+#
+# `CONSENSO_MIN_CASAS` conta casas; `n_precos` (ver `ResultadoConsenso`) já
+# mede preços distintos e rebaixa confiança (`value_calc.classificar_confianca`)
+# quando eles colapsam — mas isso é diagnóstico, não recusa o consenso. Estes
+# dois números aqui são o gate mais forte: recusam o consenso INTEIRO quando
+# não há preços/famílias de feed suficientes.
+#
+# `CONSENSO_MIN_PRECOS`: preços distintos (arredondados) entre as casas que
+# entraram na mediana. `CONSENSO_MIN_FAMILIAS`: famílias de feed distintas
+# (`consenso._familia_da_casa` — as 11 casas Altenar são UMA família, "altenar",
+# porque compartilham o mesmo feed; Betano é outra; casa fora das duas é a
+# própria).
+#
+# Por que o default é 1 pros dois (efetivamente DESLIGADO): hoje só existe
+# 1 casa Betano por evento na minoria dos eventos — ligar isto agora mataria
+# cobertura real sem necessidade, porque a maioria dos consensos ainda é só
+# Altenar. O dono liga subindo o env (ex.: `CONSENSO_MIN_FAMILIAS=2`) quando
+# decidir que quer o gate rígido, sabendo que isso reduz cobertura — a mesma
+# decisão consciente que já rege `n_precos` como diagnóstico (ver o cabeçalho
+# de `consenso.py`).
+CONSENSO_MIN_PRECOS = int(os.getenv("CONSENSO_MIN_PRECOS", "1"))
+CONSENSO_MIN_FAMILIAS = int(os.getenv("CONSENSO_MIN_FAMILIAS", "1"))
+
 # Janela de frescor dos preços das outras casas, em horas. Existe por causa do
 # rodízio: `CASAS_POR_CICLO=3` raspa poucas casas por vez, e exigir todas no
 # mesmo ciclo faria o consenso nunca formar. Quanto maior, mais casas entram —

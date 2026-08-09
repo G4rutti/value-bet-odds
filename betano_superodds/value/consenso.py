@@ -47,12 +47,41 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from statistics import median
 
+from .. import config as casas_config
 from . import config
 from .fair_odds import ProbJusta, remover_vig
 from .market_parser import ChaveConsenso, chave_consenso
 from .models import Market
 
 log = logging.getLogger(__name__)
+
+# Nomes das casas Altenar (`CasaAltenar.nome`, o mesmo que `casa=self.casa.nome`
+# grava em `mercados_casa` — ver `esportiva.py`). Reusa `CASAS_ALTENAR` de
+# `betano_superodds/config.py` em vez de listar os nomes de novo à mão: é o
+# mesmo risco de duplicação que `_FAMILIAS_PROP` já evita para outra tabela.
+_NOMES_ALTENAR = frozenset(c.nome for c in casas_config.CASAS_ALTENAR)
+
+
+def _familia_da_casa(casa: str) -> str:
+    """Família de FEED da casa, não a casa em si.
+
+    As 11 casas Altenar (`_NOMES_ALTENAR`) são skins do mesmo feed —
+    ~90% das seleções com preço idêntico, ver o cabeçalho deste módulo e
+    `CONSENSO_MIN_CASAS` em `config.py`. Contar 5 delas como 5 fontes é
+    contar a mesma fonte 5 vezes; a família junta todas em `"altenar"` pra
+    que quem for exigir independência de verdade (`CONSENSO_MIN_FAMILIAS`)
+    não seja enganado por `n_casas` alto.
+
+    Betano é plataforma própria, fora da Altenar — família própria.
+    Qualquer casa fora das duas listas (futura casa nova) vira sua própria
+    família: não hardcoda nomes que ainda não existem, e não quebra caso
+    apareça uma casa desconhecida.
+    """
+    if casa in _NOMES_ALTENAR:
+        return "altenar"
+    if casa == "Betano":
+        return "betano"
+    return casa
 
 
 def _parse_capturado(valor: object) -> datetime | None:
@@ -153,6 +182,11 @@ class ResultadoConsenso:
     # casas com um preço só é uma fonte contada três vezes, e o alerta precisa
     # dizer isso em vez de exibir "3 casas" como se fossem independentes.
     n_precos: int = 0
+    # Famílias de feed distintas (`_familia_da_casa`) entre as casas que
+    # sustentam o consenso — as 11 casas Altenar contam como UMA família só.
+    # Diagnóstico visível (Etapa 6, texto de `prob.mercado`), e também o que
+    # `CONSENSO_MIN_FAMILIAS` compara quando o gate está ligado.
+    n_familias: int = 0
     # Minutos desde o preço mais VELHO entre os que sustentam o consenso —
     # não o mais novo. `CASAS_POR_CICLO` faz o rodízio raspar poucas casas por
     # vez, então um consenso "fresco" pode estar carregando um preço de horas
@@ -388,14 +422,33 @@ def calcular(linhas: list[dict], market_nome: str, selecao: str,
                   market_nome or chave_alvo, selecao, len(probs), minimo)
         return None
 
-    p = median(probs)
-    if not 0 < p < 1:
-        return None
-
     # Preços distintos, não casas distintas: é o que separa consenso real de
     # uma fonte só replicada. Arredonda antes de contar — diferença na quarta
     # casa decimal é ruído de arredondamento da API, não opinião diferente.
     n_precos = len({round(x, 4) for x in probs})
+    n_familias = len({_familia_da_casa(c) for c in casas})
+
+    # Gate de independência de FEED (Etapa 6) — desligado por padrão
+    # (`CONSENSO_MIN_PRECOS`/`CONSENSO_MIN_FAMILIAS` default 1, ver
+    # `config.py`). Recusa o consenso INTEIRO, diferente de `n_precos`/
+    # `n_familias` visíveis na saída, que são diagnóstico e não gate.
+    if n_precos < config.CONSENSO_MIN_PRECOS:
+        log.debug("consenso insuficiente para %s / %s: %d preco(s) "
+                  "distinto(s), minimo %d",
+                  market_nome or chave_alvo, selecao, n_precos,
+                  config.CONSENSO_MIN_PRECOS)
+        return None
+    if n_familias < config.CONSENSO_MIN_FAMILIAS:
+        log.debug("consenso insuficiente para %s / %s: %d familia(s) de "
+                  "feed, minimo %d",
+                  market_nome or chave_alvo, selecao, n_familias,
+                  config.CONSENSO_MIN_FAMILIAS)
+        return None
+
+    p = median(probs)
+    if not 0 < p < 1:
+        return None
+
     idade = _idade_max_min(capturados)
 
     rotulo_mercado = (market_nome if not modo_canonico
@@ -409,12 +462,14 @@ def calcular(linhas: list[dict], market_nome: str, selecao: str,
             # é dispersão entre casas, não overround. Zero é a resposta honesta.
             overround=0.0,
             mercado=(f"{rotulo_mercado} ({len(probs)} casas, {n_precos} "
-                     f"preço(s), até {idade}min){sufixo}"),
+                     f"preço(s), {n_familias} família(s), até {idade}min)"
+                     f"{sufixo}"),
             consenso=True,
         ),
         n_casas=len(probs),
         casas=casas,
         n_precos=n_precos,
+        n_familias=n_familias,
         idade_max_min=idade,
     )
 
