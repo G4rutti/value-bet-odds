@@ -252,6 +252,10 @@ async def run_cycle(scraper: BetanoScraper, storage: Storage,
         n = storage.salvar_mercados_casa(mercados)
         podados = storage.limpar_mercados_casa(vconfig.CONSENSO_RETENCAO_HORAS)
         log.info("mercados p/ consenso: %d gravados, %d podados", n, podados)
+        # O cache da ponte fuzzy (Storage._pool_matchups/_pool_cache) fica
+        # obsoleto assim que o pool muda — invalidar aqui é o único ponto
+        # onde isso acontece no ciclo.
+        storage.invalidar_cache_pool()
 
     previous = storage.active_offers()
     result = diff_offers(previous, offers, casas_raspadas=raspadas,

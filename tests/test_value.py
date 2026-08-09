@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 
@@ -13,10 +15,12 @@ from betano_superodds.value.matcher import encontrar_evento, normalizar, score_t
 from betano_superodds.value.modelo_gols import _melhor_total, ajustar, matriz_placares
 from betano_superodds.value.models import Market, Matchup, american_para_decimal
 from betano_superodds.value.pipeline import avaliar_oferta
+from betano_superodds.value.pool_eventos import resolver_evento_id_via_pool
 from betano_superodds.value.value_calc import (avaliar_value, calcular_edge,
                                                 classe_mercado_da_perna,
                                                 classificar_confianca,
                                                 threshold_para)
+from betano_superodds.storage import Storage
 
 HOJE = datetime(2026, 8, 5, 20, 0, tzinfo=timezone.utc)
 
@@ -2232,6 +2236,196 @@ class TestTabelaDeConfianca(unittest.TestCase):
             classificar_confianca("simples", "consenso", n_casas_consenso=5,
                                   n_precos_consenso=3),
             "média")
+
+
+def _linha_pool(evento_id: str, evento: str | None, inicio_evento: str | None,
+                liga: str | None = None) -> dict:
+    return {"evento_id": evento_id, "evento": evento,
+            "inicio_evento": inicio_evento, "liga": liga}
+
+
+class TestPonteDeEvento(unittest.TestCase):
+    """A ponte fuzzy evento_id-de-casa -> evento_id-do-pool (Etapa 3).
+
+    306 ofertas ativas (Betano, Novibet, EsportesDaSorte, CasaDeAposta) têm
+    `evento_id` próprio que nunca aparece em `mercados_casa` — só as Altenar
+    escrevem lá, com id compartilhado. `resolver_evento_id_via_pool` reusa
+    `matcher.encontrar_evento` pra achar, por nome+data, qual `evento_id` do
+    pool corresponde à oferta. Os negativos aqui importam mais que o
+    positivo: é onde nasceria edge fantasma (referência do jogo ERRADO,
+    silenciosamente) se alguma guarda do matcher fosse perdida no caminho.
+    """
+
+    def test_resolve_par_com_grafia_diferente_dentro_da_janela(self):
+        pool = [_linha_pool("999", "Flamengo - Palmeiras", HOJE.isoformat(),
+                            "Brazil - Serie A")]
+        quando = (HOJE + timedelta(hours=1)).isoformat()
+        self.assertEqual(
+            resolver_evento_id_via_pool("CR Flamengo x Palmeiras", quando, pool), "999")
+
+    def test_fora_da_janela_maxima_nao_resolve(self):
+        """T+20h é dentro do MATCH_MAX_HORAS do caminho Pinnacle (18h) mas
+        fora do CONSENSO_MATCH_MAX_HORAS (3h) — a janela apertada é o ponto."""
+        pool = [_linha_pool("999", "Flamengo - Palmeiras", HOJE.isoformat(),
+                            "Brazil - Serie A")]
+        quando = (HOJE + timedelta(hours=20)).isoformat()
+        self.assertIsNone(
+            resolver_evento_id_via_pool("CR Flamengo x Palmeiras", quando, pool))
+
+    def test_uf_diferente_nao_resolve(self):
+        """Prova de que o matcher foi REUSADO, não reimplementado: sem o veto
+        de UF de `matcher.uf_conflita`, isto casaria."""
+        pool = [_linha_pool("999", "Botafogo-SP - Ferroviária", HOJE.isoformat(),
+                            "Brazil - Serie B")]
+        quando = (HOJE + timedelta(minutes=30)).isoformat()
+        self.assertIsNone(
+            resolver_evento_id_via_pool("Botafogo-RJ - Ferroviária", quando, pool))
+
+    def test_linha_sem_inicio_evento_nunca_vira_candidata(self):
+        """Sem isto a linha entraria no matcher com `commence_time=None`, que
+        DESLIGA a checagem de data — o modo mais frouxo, justo onde a ponte
+        precisa do mais apertado."""
+        pool = [_linha_pool("999", "Flamengo - Palmeiras", None, "Brazil - Serie A")]
+        self.assertIsNone(
+            resolver_evento_id_via_pool("Flamengo - Palmeiras", HOJE.isoformat(), pool))
+
+    def test_oferta_sem_inicio_evento_recusa(self):
+        """Kickoff obrigatório dos DOIS lados — sem data na oferta a checagem
+        também desligaria, mesmo com o pool inteiro tendo data."""
+        pool = [_linha_pool("999", "Flamengo - Palmeiras", HOJE.isoformat(),
+                            "Brazil - Serie A")]
+        self.assertIsNone(resolver_evento_id_via_pool("Flamengo - Palmeiras", None, pool))
+
+    def test_genero_sem_liga_no_pool_recusa(self):
+        """Armadilha documentada: sem `liga`, `genero_conflita` não detecta o
+        marcador do lado do pool, e a oferta feminina passaria batido."""
+        pool = [_linha_pool("999", "Corinthians - Palmeiras", HOJE.isoformat(), None)]
+        self.assertIsNone(resolver_evento_id_via_pool(
+            "Corinthians (F) - Palmeiras (F)", HOJE.isoformat(), pool))
+
+
+class TestPonteDeEventoNoStorage(unittest.TestCase):
+    """Cache e integração fim a fim, contra um `Storage` real (banco temp).
+
+    Não usa `StorageFake` aqui: o que se testa é a MEMOIZAÇÃO dentro do
+    `Storage` de verdade (`resolver_evento_consenso`/`invalidar_cache_pool`),
+    que é o que sobrevive ao ciclo inteiro enquanto `ProvedorConsenso` nasce e
+    morre por oferta.
+    """
+
+    def _storage_temp(self) -> Storage:
+        fd, caminho = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        os.unlink(caminho)
+        storage = Storage(caminho)
+        # LIFO: registra o unlink primeiro pra ele rodar DEPOIS do close —
+        # no Windows um sqlite aberto trava o arquivo, e a ordem contrária
+        # falharia com PermissionError.
+        self.addCleanup(lambda: os.path.exists(caminho) and os.unlink(caminho))
+        self.addCleanup(storage.close)
+        return storage
+
+    @staticmethod
+    def _inserir_mercado(storage: Storage, *, casa: str, evento_id: str,
+                         market_id: str, market_nome: str, selecao: str,
+                         preco: float, capturado_em: str, evento: str,
+                         inicio_evento: str, liga: str | None) -> None:
+        with storage._conn:
+            storage._conn.execute(
+                """
+                REPLACE INTO mercados_casa
+                    (casa, evento_id, market_id, market_nome, selecao, preco,
+                     capturado_em, evento, inicio_evento, liga)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (casa, evento_id, market_id, market_nome, selecao, preco,
+                 capturado_em, evento, inicio_evento, liga),
+            )
+
+    def test_cache_uma_soh_varredura_do_pool(self):
+        """Duas ofertas (do mesmo jogo ou não) só disparam UMA varredura do
+        pool por ciclo — é o que impede pagar N×M nas ofertas que nunca vão
+        casar."""
+        storage = self._storage_temp()
+        agora = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+        kickoff = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+        self._inserir_mercado(
+            storage, casa="Esportiva", evento_id="999", market_id="1",
+            market_nome="Total de escanteios", selecao="Mais de 9.5", preco=1.90,
+            capturado_em=agora, evento="Flamengo - Palmeiras",
+            inicio_evento=kickoff, liga="Brazil - Serie A")
+
+        chamadas = {"n": 0}
+        original = storage.eventos_do_pool
+
+        def contado(*args, **kwargs):
+            chamadas["n"] += 1
+            return original(*args, **kwargs)
+
+        storage.eventos_do_pool = contado
+
+        r1 = storage.resolver_evento_consenso(
+            "CR Flamengo x Palmeiras", kickoff, config.CONSENSO_JANELA_HORAS)
+        r2 = storage.resolver_evento_consenso(
+            "Flamengo - Palmeiras", kickoff, config.CONSENSO_JANELA_HORAS)
+        self.assertEqual(r1, "999")
+        self.assertEqual(r2, "999")
+        self.assertEqual(chamadas["n"], 1, "a varredura do pool rodou mais de uma vez")
+
+        # Segundo pedido idêntico ao primeiro: vem do cache de resolvido, não
+        # dispara nem a varredura nem recomputa o matcher.
+        r1_de_novo = storage.resolver_evento_consenso(
+            "CR Flamengo x Palmeiras", kickoff, config.CONSENSO_JANELA_HORAS)
+        self.assertEqual(r1_de_novo, "999")
+        self.assertEqual(chamadas["n"], 1)
+
+    def test_invalidar_cache_pool_forca_nova_varredura(self):
+        storage = self._storage_temp()
+        agora = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+        kickoff = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+        self._inserir_mercado(
+            storage, casa="Esportiva", evento_id="999", market_id="1",
+            market_nome="Total de escanteios", selecao="Mais de 9.5", preco=1.90,
+            capturado_em=agora, evento="Flamengo - Palmeiras",
+            inicio_evento=kickoff, liga="Brazil - Serie A")
+
+        storage.resolver_evento_consenso(
+            "CR Flamengo x Palmeiras", kickoff, config.CONSENSO_JANELA_HORAS)
+        self.assertIsNotNone(storage._pool_matchups)
+
+        storage.invalidar_cache_pool()
+        self.assertIsNone(storage._pool_matchups)
+        self.assertEqual(storage._pool_cache, {})
+
+    def test_ponte_alimenta_provedor_consenso(self):
+        """Fim a fim: `evento_id` literal da oferta ("777") vazio no pool, mas
+        `evento`/`inicio_evento` que casam via ponte — `prob_para` consegue
+        formar consenso mesmo assim."""
+        storage = self._storage_temp()
+        agora = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+        kickoff = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+        for casa in ("VaiDeBet", "EstrelaBet", "vupi", "BateuBet", "4Play"):
+            for selecao, preco in (("Mais de 9.5", 1.90), ("Menos de 9.5", 1.90)):
+                self._inserir_mercado(
+                    storage, casa=casa, evento_id="999", market_id="33",
+                    market_nome="Total de escanteios", selecao=selecao, preco=preco,
+                    capturado_em=agora, evento="Flamengo - Palmeiras",
+                    inicio_evento=kickoff, liga="Brazil - Serie A")
+
+        provedor = consenso.ProvedorConsenso(
+            storage, evento_id="777", evento="CR Flamengo x Palmeiras",
+            inicio_evento=kickoff)
+        r = provedor.prob_para("Total de escanteios: Mais de 9.5")
+        self.assertIsNotNone(r, "a ponte deveria ter achado o evento_id 999 do pool")
+        self.assertEqual(r.n_casas, 5)
+
+    def test_sem_evento_ou_inicio_na_oferta_nao_tenta_a_ponte(self):
+        """`ProvedorConsenso` sem `evento`/`inicio_evento` (construtor antigo)
+        continua morrendo em cobertura vazia, sem tentar a ponte — regressão
+        zero pro caminho que já existia."""
+        storage = self._storage_temp()
+        provedor = consenso.ProvedorConsenso(storage, evento_id="777")
+        self.assertIsNone(provedor.prob_para("Total de escanteios: Mais de 9.5"))
 
 
 if __name__ == "__main__":

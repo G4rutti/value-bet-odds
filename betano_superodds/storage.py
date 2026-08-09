@@ -9,6 +9,9 @@ from pathlib import Path
 from . import config
 from .diff import DiffResult
 from .models import MercadoCasa, Offer
+from .value import matcher as _matcher
+from .value.pool_eventos import montar_matchups as _montar_matchups
+from .value.pool_eventos import resolver_evento_id as _resolver_evento_id
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS offers (
@@ -230,6 +233,20 @@ class Storage:
         self._conn.executescript(SCHEMA)
         self._migrar()
         self._conn.commit()
+        # Cache em memória da ponte fuzzy evento->pool (Etapa 3 do plano de
+        # cobertura). Vive aqui, e não em `ProvedorConsenso`, porque este é
+        # construído POR OFERTA (`pipeline.avaliar_oferta`) — um cache lá
+        # morreria a cada oferta. `Storage` é compartilhado pelo ciclo
+        # inteiro, então é o único lugar onde memoizar rende.
+        #
+        # `_pool_matchups=None` é "ainda não montado neste ciclo", distinto de
+        # `[]` ("montei e o pool está vazio") — só o primeiro dispara nova
+        # varredura. `invalidar_cache_pool` deve ser chamada sempre que
+        # `mercados_casa` mudar (ver `main.py`, logo após `salvar_mercados_casa`).
+        self._pool_matchups: list | None = None
+        # Memoiza também os negativos (`None`): é isso que evita pagar N×M
+        # (ofertas × eventos do pool) pelas ofertas que nunca vão casar.
+        self._pool_cache: dict[tuple[str, str], str | None] = {}
 
     def _migrar(self) -> None:
         """Colunas novas em banco já existente.
@@ -389,6 +406,51 @@ class Storage:
             (corte,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def resolver_evento_consenso(self, evento: str | None,
+                                 inicio_evento: str | None,
+                                 janela_horas: float) -> str | None:
+        """`evento_id` do pool pra uma oferta de casa não-Altenar, via ponte
+        fuzzy (`value.pool_eventos`) — ou None se não achou/não deu pra tentar.
+
+        Cacheado no processo: a lista de `Matchup` sintéticos é montada uma
+        vez por ciclo (`_pool_matchups`), e o resultado por
+        `(evento normalizado, kickoff arredondado à hora)` é memoizado —
+        inclusive quando é `None`, pra não pagar a varredura de novo por uma
+        oferta que nunca vai casar. `invalidar_cache_pool` reseta os dois no
+        único ponto em que `mercados_casa` muda.
+        """
+        if not evento or not inicio_evento:
+            return None
+
+        if self._pool_matchups is None:
+            self._pool_matchups = _montar_matchups(self.eventos_do_pool(janela_horas))
+
+        chave = self._chave_cache_pool(evento, inicio_evento)
+        if chave is None:
+            return None
+        if chave in self._pool_cache:
+            return self._pool_cache[chave]
+
+        resultado = _resolver_evento_id(evento, inicio_evento, self._pool_matchups)
+        self._pool_cache[chave] = resultado
+        return resultado
+
+    @staticmethod
+    def _chave_cache_pool(evento: str, inicio_evento: str) -> tuple[str, str] | None:
+        """`(nome normalizado, kickoff arredondado à hora)` — colapsa as várias
+        skins Altenar/ofertas do mesmo jogo numa entrada só."""
+        quando = _matcher._parse_data(inicio_evento)
+        if quando is None:
+            return None
+        hora = quando.replace(minute=0, second=0, microsecond=0).isoformat()
+        return (_matcher.normalizar(evento), hora)
+
+    def invalidar_cache_pool(self) -> None:
+        """Zera o cache da ponte fuzzy. Chamar sempre que `mercados_casa`
+        mudar — hoje, só depois de `salvar_mercados_casa` (ver `main.py`)."""
+        self._pool_matchups = None
+        self._pool_cache = {}
 
     def limpar_mercados_casa(self, mais_velhos_que_horas: float) -> int:
         """Poda o que já não serve pra consenso — a tabela cresce rápido."""

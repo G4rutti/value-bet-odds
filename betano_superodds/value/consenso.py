@@ -360,16 +360,38 @@ class ProvedorConsenso:
     casa da oferta em avaliação, e para poder ser injetado nos testes sem banco.
     """
 
-    def __init__(self, storage, evento_id: str, casa: str | None = None) -> None:
+    def __init__(self, storage, evento_id: str, casa: str | None = None,
+                 evento: str | None = None, inicio_evento: str | None = None) -> None:
         self.storage = storage
         self.evento_id = str(evento_id)
         self.casa = casa
+        # Nome/kickoff da OFERTA (não do pool) — só usados quando a busca
+        # literal por `evento_id` volta vazia, pra tentar a ponte fuzzy
+        # (Etapa 3: 306 ofertas de casa não-Altenar nunca têm seu `evento_id`
+        # no pool, porque só as Altenar escrevem lá com id compartilhado).
+        self.evento = evento
+        self.inicio_evento = inicio_evento
         self._cache: list[dict] | None = None
 
     def _linhas(self) -> list[dict]:
-        if self._cache is None:
-            self._cache = self.storage.mercados_para_consenso(
-                self.evento_id, config.CONSENSO_JANELA_HORAS)
+        if self._cache is not None:
+            return self._cache
+
+        linhas = self.storage.mercados_para_consenso(
+            self.evento_id, config.CONSENSO_JANELA_HORAS)
+        if not linhas and self.evento and self.inicio_evento:
+            # A busca literal pelo `evento_id` da própria oferta não achou
+            # nada — esperado pra casa não-Altenar. Tenta achar o `evento_id`
+            # certo do pool via nome+data (`Storage.resolver_evento_consenso`,
+            # que reusa `matcher.encontrar_evento`) e refaz a busca literal
+            # com ele.
+            evento_id_pool = self.storage.resolver_evento_consenso(
+                self.evento, self.inicio_evento, config.CONSENSO_JANELA_HORAS)
+            if evento_id_pool:
+                linhas = self.storage.mercados_para_consenso(
+                    evento_id_pool, config.CONSENSO_JANELA_HORAS)
+
+        self._cache = linhas
         return self._cache
 
     def prob_para(self, texto_perna: str) -> ResultadoConsenso | None:

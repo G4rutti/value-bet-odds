@@ -224,6 +224,24 @@ EDGE_MIN_PROP = float(os.getenv("EDGE_MIN_PROP", "30.0"))
 CONSENSO_RETENCAO_HORAS = float(os.getenv("CONSENSO_RETENCAO_HORAS", "12.0"))
 
 # ---------------------------------------------------------------------------
+# Ponte fuzzy evento_id -> pool (Etapa 3): casa não-Altenar (Betano, Novibet,
+# EsportesDaSorte, CasaDeAposta) nunca tem seu `evento_id` no pool, que só as
+# Altenar escrevem. `resolver_evento_id_via_pool` (`pool_eventos.py`) reusa
+# `matcher.encontrar_evento` pra achar, por nome+data, qual `evento_id` do
+# pool corresponde à oferta.
+#
+# Constantes PRÓPRIAS, deliberadamente mais apertadas que as do caminho
+# Pinnacle (`MATCH_MIN_SCORE`/`MATCH_MAX_HORAS` acima) — errar aqui não é
+# "sem referência", é "referência do jogo ERRADO", silenciosamente, porque
+# vira consenso normal depois.
+CONSENSO_MATCH_MIN_SCORE = float(os.getenv("CONSENSO_MATCH_MIN_SCORE", "85"))
+
+# A janela de consenso é 3h (`CONSENSO_JANELA_HORAS`) e a retenção 12h; 18h
+# (o padrão do caminho Pinnacle) deixaria a ponte casar a RODADA ERRADA do
+# mesmo confronto (ida/volta, turno/returno).
+CONSENSO_MATCH_MAX_HORAS = float(os.getenv("CONSENSO_MATCH_MAX_HORAS", "3.0"))
+
+# ---------------------------------------------------------------------------
 # Modelo de placar (`modelo_gols`)
 # ---------------------------------------------------------------------------
 #

@@ -75,7 +75,9 @@ def avaliar_oferta(oferta: dict, matchups: list[Matchup],
     consenso = None
     if storage is not None and oferta.get("evento_id"):
         consenso = ProvedorConsenso(storage, str(oferta["evento_id"]),
-                                    oferta.get("casa"))
+                                    oferta.get("casa"),
+                                    evento=oferta.get("evento"),
+                                    inicio_evento=oferta.get("inicio_evento"))
 
     # 0. perna sem referência mata a oferta independente de casar o evento —
     # e sai antes de qualquer request. Metade das super odds da Betano tem
