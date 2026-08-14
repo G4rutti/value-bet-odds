@@ -6,8 +6,9 @@ import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
-from betano_superodds.value import config, consenso, stake
+from betano_superodds.value import config, consenso, curadoria, stake
 from betano_superodds.value.fair_odds import calcular_odd_justa, prob_da_perna, remover_vig
 from betano_superodds.value.market_parser import (ChaveConsenso, Leg, chave_consenso,
                                                     parse_leg, parse_mercado, tipo_mercado)
@@ -251,6 +252,70 @@ class TestChaveConsenso(unittest.TestCase):
         self.assertNotEqual(
             chave_consenso("2º tempo - total cartões Mais de 1.5"),
             chave_consenso("Total cartões Mais de 1.5"))
+
+    # --- grafias do POOL: o outro lado do casamento -----------------------
+    # Todas verificadas contra `mercados_casa` no banco vivo. O que a chave
+    # precisa garantir é que o rótulo do POOL e o rótulo da OFERTA que
+    # descrevem o MESMO evento produzam a MESMA chave — antes destes casos,
+    # 150 pernas casavam 0 casas porque só o lado da oferta saía certo.
+
+    def test_pool_jogador_apos_o_mercado_casa_com_jogador_antes(self):
+        """"Chutes a Gol - Moussa Dembele (ETT)" (pool) e "Moussa Dembele
+        Chutes no gol 2+" (oferta) são o mesmo prop. A sigla de time no fim
+        não faz parte do nome."""
+        self.assertEqual(
+            chave_consenso("Chutes a Gol - Moussa Dembele (ETT) Mais de 1.5"),
+            chave_consenso("Moussa Dembele Chutes no gol 2+"))
+
+    def test_pool_jogador_entre_parenteses_aninhados(self):
+        """"Chutes a Gol do Jogador (Carles Alena (ALA)) - Inclui substitutos":
+        o nome está no parêntese externo, e "do Jogador"/"Inclui substitutos"
+        é qualificação, não entidade."""
+        self.assertEqual(
+            chave_consenso("Chutes a Gol do Jogador (Carles Alena (ALA)) "
+                           "- Inclui substitutos Mais de 0.5"),
+            chave_consenso("Carles Alena Chutes no gol 1+"))
+
+    def test_pool_total_de_equipe_e_time_nao_jogador(self):
+        """"Al Ettifaq FC total cartões" saía como `jogador:al ettifaq fc
+        total` — o "total" grudado é a palavra do mercado, e quem vem antes
+        dele é EQUIPE."""
+        chave = chave_consenso("Al Ettifaq FC total cartões Mais de 2.5")
+        self.assertEqual(chave.escopo, "time:al ettifaq")
+        self.assertEqual(chave, chave_consenso("Cartões do Al Ettifaq FC Mais de 2.5"))
+
+    def test_pool_equipe_depois_do_total(self):
+        self.assertEqual(
+            chave_consenso("Total de chutes a Gol Deportivo Alavés Mais de 3.5"),
+            chave_consenso("Chutes no gol do Deportivo Alavés Mais de 3.5"))
+
+    def test_pool_total_do_jogo_nao_vira_total_de_equipe(self):
+        """Sem equipe depois do mercado o escopo tem que continuar sendo o do
+        JOGO. "Totais chutes a Gol Mais de 8.5" já devolveu
+        `time:mais de 8 5` — a própria linha lida como nome de time."""
+        self.assertEqual(chave_consenso("Totais chutes a Gol Mais de 8.5").escopo,
+                         "jogo")
+        self.assertEqual(chave_consenso("Total cartões Mais de 3.5").escopo, "jogo")
+
+    def test_mercado_combinado_do_pool_e_recusado(self):
+        """"Para marcar em qualquer momento & 1x2 (<Jogador>)" tem como
+        seleções os desfechos do 1X2 condicionados ao gol do jogador — 34.272
+        linhas no pool só da grafia do primeiro gol. Precificar um artilheiro
+        puro contra isso é mercado restrito x referência ampla, e ainda por
+        cima o combinado é MENOS provável: o edge sairia inflado."""
+        for rotulo in ("Para marcar em qualquer momento & 1x2 (Moussa Dembele)",
+                       "Jogador a marcar o primeiro gol & Placar exato",
+                       "Marcador a Qualquer Momento & Placar Correto (Murilo)"):
+            self.assertIsNone(chave_consenso(rotulo), rotulo)
+
+    def test_chave_sem_lado_e_recusada(self):
+        """Chave sem `lado` não identifica um DESFECHO, só um mercado, e
+        `_mercados_por_casa_canonico` escolhe a seleção PELO lado. Medido no
+        banco: "Cartões 1x2: 2" (fora, 2.08) casava com o time da casa (2.45)
+        em 7 casas. E "Cartões 1x2"/"Cartões exatos", mercados diferentes,
+        produziam a mesma chave."""
+        self.assertIsNone(chave_consenso("Cartões 1x2: 2"))
+        self.assertIsNone(chave_consenso("Cartões exatos 3"))
 
     def test_parse_mercado_continua_recusando_cartoes(self):
         """Regressão: `consenso_chave` é campo aditivo, não muda `suportado`
@@ -983,6 +1048,82 @@ class TestPipeline(unittest.TestCase):
         self.assertIsNone(r["odd_justa"])
 
 
+class TestCuradoriaNoPipeline(unittest.TestCase):
+    """`curadoria.avaliar` roda ao lado do rebaixamento legado
+    (`_UM_DEGRAU_ABAIXO`) dentro de `avaliar_oferta`. Não usa SofaScore de
+    verdade — `curadoria.avaliar` é trocado por um stub, porque o que este
+    teste cobre é a INTEGRAÇÃO (flags, aplicação do veredito), não o
+    julgamento em si (isso é `test_curadoria.py`)."""
+
+    def _oferta(self, mercado="Resultado Final: Celtic", boost=1.50):
+        return {"evento": "Celtic - Dundee FC", "mercado": mercado,
+                "odd_original": 1.19, "odd_boost": boost,
+                "valido_ate": HOJE.isoformat(), "url": "http://x"}
+
+    def setUp(self):
+        self._ativa_orig = config.CURADORIA_ATIVA
+        self._enforce_orig = config.CURADORIA_ENFORCE
+
+    def tearDown(self):
+        config.CURADORIA_ATIVA = self._ativa_orig
+        config.CURADORIA_ENFORCE = self._enforce_orig
+
+    def test_desligada_nao_chama_curadoria(self):
+        config.CURADORIA_ATIVA = False
+        with mock.patch.object(curadoria, "avaliar") as m:
+            r = avaliar_oferta(self._oferta(), [matchup_exemplo()])
+        m.assert_not_called()
+        self.assertNotIn("veredito_curadoria", r)
+
+    def test_modo_sombra_nao_muda_is_value_nem_confianca(self):
+        """Sombra grava o veredito mas a oferta segue seu caminho normal —
+        é o que permite comparar depois sem arriscar dinheiro real."""
+        config.CURADORIA_ATIVA = True
+        config.CURADORIA_ENFORCE = False
+        veredito = curadoria.Veredito(
+            decisao="vetado", motivo="notícia fresca + forma ruim",
+            confianca_original="alta", confianca_final="alta", modo="sombra")
+        with mock.patch.object(curadoria, "avaliar", return_value=veredito):
+            r = avaliar_oferta(self._oferta(), [matchup_exemplo()])
+        self.assertTrue(r["is_value"], "sombra não pode derrubar is_value")
+        self.assertEqual(r["confianca"], "alta")
+        self.assertIs(r["veredito_curadoria"], veredito)
+
+    def test_enforce_veto_derruba_is_value(self):
+        config.CURADORIA_ATIVA = True
+        config.CURADORIA_ENFORCE = True
+        veredito = curadoria.Veredito(
+            decisao="vetado", motivo="notícia fresca + forma ruim",
+            confianca_original="alta", confianca_final="alta", modo="enforce")
+        with mock.patch.object(curadoria, "avaliar", return_value=veredito):
+            r = avaliar_oferta(self._oferta(), [matchup_exemplo()])
+        self.assertFalse(r["is_value"])
+        self.assertEqual(r["status_curadoria"], "vetado")
+
+    def test_enforce_degrau_rebaixa_confianca(self):
+        config.CURADORIA_ATIVA = True
+        config.CURADORIA_ENFORCE = True
+        veredito = curadoria.Veredito(
+            decisao="degrau", motivo="forma recente ruim",
+            confianca_original="alta", confianca_final="média-alta",
+            modo="enforce")
+        with mock.patch.object(curadoria, "avaliar", return_value=veredito):
+            r = avaliar_oferta(self._oferta(), [matchup_exemplo()])
+        self.assertTrue(r["is_value"], "degrau não veta, só rebaixa confiança")
+        self.assertEqual(r["confianca"], "média-alta")
+
+    def test_nao_elegivel_curadoria_avaliar_devolve_none_e_nada_muda(self):
+        """`curadoria.avaliar` já devolve `None` sozinho pra tier fora de
+        `ELEGIVEL` — este teste confirma que o pipeline lida bem com isso
+        (sem quebrar, sem gravar `veredito_curadoria`)."""
+        config.CURADORIA_ATIVA = True
+        config.CURADORIA_ENFORCE = True
+        with mock.patch.object(curadoria, "avaliar", return_value=None):
+            r = avaliar_oferta(self._oferta(), [matchup_exemplo()])
+        self.assertTrue(r["is_value"])
+        self.assertNotIn("veredito_curadoria", r)
+
+
 class StorageFake:
     """Devolve linhas de `mercados_casa` sem banco.
 
@@ -1175,6 +1316,35 @@ class TestConsenso(unittest.TestCase):
                          "deriva numérica entre o caminho canônico e o literal")
         self.assertEqual(canonico.n_casas, literal.n_casas)
         self.assertEqual(canonico.n_precos, literal.n_precos)
+
+    def test_rotulo_com_dois_pontos_cai_no_canonico_quando_o_literal_falha(self):
+        """A perna tem ":", mas a grafia do pool é outra — o literal
+        (igualdade de string) não forma nada. Antes disto o ramo com ":" nem
+        tentava a chave canônica: 175 pernas medidas no banco morriam aí, com
+        o fallback de `calcular` virando código morto pra elas."""
+        linhas = (_linhas_casa("VaiDeBet", 1.90, 1.90, "Total cartões", "4.5")
+                  + _linhas_casa("EstrelaBet", 1.95, 1.85, "Total cartões", "4.5")
+                  + _linhas_casa("vupi", 1.88, 1.92, "Total cartões", "4.5")
+                  + _linhas_casa("BateuBet", 1.92, 1.88, "Total cartões", "4.5")
+                  + _linhas_casa("4Play", 1.87, 1.93, "Total cartões", "4.5")
+                  + _linhas_casa("GingaBet", 1.93, 1.87, "Total cartões", "4.5"))
+        provedor = consenso.ProvedorConsenso(StorageFake(linhas), evento_id="1")
+
+        # Grafia da Novibet, com ":" e "5,5"/"4.5" separados do pool.
+        r = provedor.prob_para("Total de Cartões: Mais de 4.5")
+
+        self.assertIsNotNone(r, "o fallback canônico não foi tentado")
+        self.assertEqual(r.n_casas, 6)
+
+    def test_literal_continua_ganhando_do_canonico(self):
+        """Regressão da ordem: com o literal formando, o canônico não pode
+        entrar. O literal casa a SELEÇÃO por string; o canônico casa por
+        `lado`, que é mais frouxo."""
+        provedor = consenso.ProvedorConsenso(
+            StorageFake(self._tres_casas()), evento_id="1")
+        r = provedor.prob_para("Total de cartões 3.5: Mais de 3.5")
+        self.assertIsNotNone(r)
+        self.assertNotIn("via chave canônica", r.prob.mercado)
 
     def test_idade_max_min_reflete_o_preco_mais_velho(self):
         """`idade_max_min` mede o preço MAIS VELHO que sustenta o consenso, não
@@ -2370,6 +2540,88 @@ class TestPonteDeEvento(unittest.TestCase):
         pool = [_linha_pool("999", "Corinthians - Palmeiras", HOJE.isoformat(), None)]
         self.assertIsNone(resolver_evento_id_via_pool(
             "Corinthians (F) - Palmeiras (F)", HOJE.isoformat(), pool))
+
+
+class StoragePorEvento:
+    """`StorageFake` que responde DIFERENTE por `evento_id`, mais a ponte.
+
+    O `StorageFake` devolve as mesmas linhas pra qualquer id, então não serve
+    pra testar quando a ponte dispara — é justamente a diferença entre o id da
+    própria casa e o id do pool que está em jogo.
+    """
+
+    def __init__(self, por_id: dict[str, list[dict]], ponte: str | None) -> None:
+        self.por_id = por_id
+        self.ponte = ponte
+        self.ponte_consultada = False
+
+    def mercados_para_consenso(self, evento_id: str, janela_horas: float):
+        return list(self.por_id.get(str(evento_id), []))
+
+    def resolver_evento_consenso(self, evento, inicio_evento, janela_horas):
+        self.ponte_consultada = True
+        return self.ponte
+
+
+class TestPonteQuandoSoTemAPropriaCasa(unittest.TestCase):
+    """A ponte fuzzy tem que disparar quando o `evento_id` literal só traz a
+    CASA AVALIADA — não só quando não traz nada.
+
+    Desde que a Betano virou writer de `mercados_casa`, as linhas dela vêm sob
+    o `evento_id` dela: a busca literal passou a voltar não-vazia, a ponte
+    (que só olhava `not linhas`) nunca disparava, e `excluir_casa="Betano"`
+    esvaziava tudo logo depois. Medido no banco: 24 ofertas nessa situação,
+    todas com o evento certo achável no pool.
+    """
+
+    def _pool_com_seis_casas(self) -> list[dict]:
+        return (_linhas_casa("VaiDeBet", 1.90, 1.90)
+                + _linhas_casa("EstrelaBet", 1.95, 1.85)
+                + _linhas_casa("vupi", 1.88, 1.92)
+                + _linhas_casa("BateuBet", 1.92, 1.88)
+                + _linhas_casa("4Play", 1.87, 1.93)
+                + _linhas_casa("GingaBet", 1.93, 1.87))
+
+    def test_so_a_propria_casa_dispara_a_ponte(self):
+        storage = StoragePorEvento(
+            {"betano-1": _linhas_casa("Betano", 2.00, 1.80),
+             "pool-9": self._pool_com_seis_casas()},
+            ponte="pool-9")
+        provedor = consenso.ProvedorConsenso(
+            storage, evento_id="betano-1", casa="Betano",
+            evento="Flamengo - Palmeiras", inicio_evento=HOJE.isoformat())
+
+        r = provedor.prob_para("Total de cartões 3.5: Mais de 3.5")
+
+        self.assertTrue(storage.ponte_consultada, "a ponte nem foi tentada")
+        self.assertIsNotNone(r, "com o pool achado o consenso tinha que formar")
+        self.assertEqual(r.n_casas, 6)
+        self.assertNotIn("Betano", r.casas, "a casa avaliada não é referência de si")
+
+    def test_com_outra_casa_no_id_literal_a_ponte_nao_e_chamada(self):
+        """Regressão: o caminho que já funcionava não pode pagar a varredura
+        da ponte. Basta UMA linha de outra casa pra referência ser possível."""
+        storage = StoragePorEvento(
+            {"alt-1": self._pool_com_seis_casas() + _linhas_casa("Betano", 2.0, 1.8)},
+            ponte="pool-9")
+        provedor = consenso.ProvedorConsenso(
+            storage, evento_id="alt-1", casa="Betano",
+            evento="Flamengo - Palmeiras", inicio_evento=HOJE.isoformat())
+
+        r = provedor.prob_para("Total de cartões 3.5: Mais de 3.5")
+
+        self.assertFalse(storage.ponte_consultada)
+        self.assertEqual(r.n_casas, 6)
+
+    def test_ponte_que_nao_resolve_mantem_as_linhas_originais(self):
+        """Sem evento no pool, nada de trocar o que já se tinha por vazio."""
+        storage = StoragePorEvento(
+            {"betano-1": _linhas_casa("Betano", 2.00, 1.80)}, ponte=None)
+        provedor = consenso.ProvedorConsenso(
+            storage, evento_id="betano-1", casa="Betano",
+            evento="Flamengo - Palmeiras", inicio_evento=HOJE.isoformat())
+
+        self.assertEqual(len(provedor._linhas()), 2)
 
 
 class TestPonteDeEventoNoStorage(unittest.TestCase):

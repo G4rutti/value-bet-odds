@@ -275,6 +275,95 @@ _ENTIDADE_APOS_MERCADO = re.compile(
     r"|sim\s*$|n(?:ã|a)o\s*$|\d+\s*\+\s*$|$)",
     re.IGNORECASE)
 
+# "Chutes a Gol - Jesse Shaun Derry (ALA)" / "Chutes - Kauã Almeida da Costa
+# (PON)" — grafia Altenar de prop de JOGADOR no pool de consenso: o nome vem
+# DEPOIS da palavra do mercado, separado por hífen e sem o "do/da/de" que
+# `_ENTIDADE_APOS_MERCADO` exige. Sem isto o rótulo do pool caía no escopo
+# "jogo" e nunca casava com a grafia da oferta ("Lucas Barbosa Chutes no gol
+# 1+", que produz `jogador:...`) — 30 pernas de chute ao gol casando 0 casas.
+_JOGADOR_APOS_MERCADO = re.compile(
+    r"^[-–]\s*(.+?)\s*(?=mais\s+de\b|menos\s+de\b|over\b|under\b"
+    r"|sim\s*$|n(?:ã|a)o\s*$|\d+\s*\+\s*$|$)",
+    re.IGNORECASE)
+
+# "Chutes a Gol do Jogador (Carles Alena (ALA))" — o nome real está no
+# parêntese, e o texto em volta ("do Jogador", "- Inclui substitutos") é
+# qualificação, não entidade. Pega o parêntese MAIS INTERNO com nome de
+# pessoa; a sigla de time em caixa alta ("(ALA)", "(ETT)") é descartada por
+# `_SIGLA_DE_TIME`.
+_PARENTESES = re.compile(r"\(([^()]*)\)")
+_SIGLA_DE_TIME = re.compile(r"^[A-ZÀ-Ý0-9\s.'-]{1,5}$")
+
+# Sufixo de qualificação que a Altenar cola no fim do rótulo e que não faz
+# parte do nome da entidade.
+_QUALIFICADOR = re.compile(
+    r"\s*[-–]\s*(inclui\s+substitutos?|incl\.?\s+substitutos?)\s*$", re.IGNORECASE)
+
+# "Al Ettifaq FC total cartões" -> a entidade é "Al Ettifaq FC", e o "total"
+# grudado no fim é a palavra do mercado, não parte do nome. É também o que
+# distingue TIME de JOGADOR nesta grafia: quem vem antes de "total <mercado>"
+# é equipe ("<Time> total cartões"), quem vem antes do mercado puro é jogador
+# ("Lucas Barbosa Chutes no gol 1+").
+_TOTAL_NO_FIM = re.compile(r"\b(totais|total)\s*$", re.IGNORECASE)
+
+# Mercado COMBINADO no pool: "Para marcar em qualquer momento & 1x2 (Łukasz
+# Zjawiński)", "Jogador a marcar o primeiro gol & Placar exato", "Marcador a
+# Qualquer Momento & Placar Correto (...)". As seleções desses mercados são os
+# desfechos do OUTRO mercado (1x2, placar), condicionados ao gol do jogador —
+# conferido no pool: 34.272 linhas só da primeira grafia.
+#
+# ⚠️ Precificar "Marcar em qualquer momento: Griezmann" contra isto é a
+# armadilha "mercado restrito casado com referência ampla" da skill
+# `value-bet-methodology`, com o agravante de que o combinado é MENOS provável
+# que a perna sozinha — o edge sairia inflado, não deflacionado. `COMBINADOS`
+# não pega estes porque a Altenar usa "&" onde a Esportiva usa " e ".
+_COMBINADO_POOL = re.compile(r"&|\bplacar\s+(exato|correto)\b", re.IGNORECASE)
+
+# "Total de chutes a Gol Deportivo Alavés" / "Total (2.5) Chutes Ponte Preta"
+# — entidade DEPOIS do mercado e SEM o "do/da/de" de `_ENTIDADE_APOS_MERCADO`.
+# Só é consultado quando o rótulo disse "Total ..." antes do mercado: é esse
+# "Total" que autoriza ler o resto como equipe. Sem essa amarra, qualquer
+# sobra de texto depois do mercado viraria nome de time.
+# `.*?` (não `.+?`): em "Totais chutes a Gol Mais de 8.5" não há equipe
+# nenhuma depois do mercado, e o lookahead casa já na posição 0. Com `.+?` o
+# motor era obrigado a consumir um caractere, ia até o fim e devolvia a
+# própria linha ("mais de 8 5") como nome de time — o total do JOGO virava
+# total de equipe, exatamente a troca de escopo que esta função existe pra
+# evitar. Grupo vazio significa "sem equipe": o escopo continua o do jogo.
+_ENTIDADE_APOS_TOTAL = re.compile(
+    r"^(.*?)\s*(?=mais\s+de\b|menos\s+de\b|over\b|under\b"
+    r"|sim\s*$|n(?:ã|a)o\s*$|\d+\s*\+\s*$|$)",
+    re.IGNORECASE)
+
+
+def _jogador_parentizado(texto: str) -> str | None:
+    """Nome de jogador entre parênteses, ou None.
+
+    Trata o aninhamento real do pool ("(Carles Alena (ALA))") tirando os
+    grupos mais internos e reescaneando. Descarta sigla de time ("(ALA)",
+    "(ETT)") e linha numérica ("(2.5)"), que ocupam o mesmo parêntese em
+    outras grafias.
+    """
+    candidatos: list[str] = []
+    atual = texto
+    for _ in range(3):   # aninhamento observado é 1; 3 é folga barata
+        grupos = _PARENTESES.findall(atual)
+        if not grupos:
+            break
+        candidatos += grupos
+        atual = _PARENTESES.sub("", atual)
+    for bruto in candidatos:
+        nome = bruto.strip()
+        if not nome or _SIGLA_DE_TIME.match(nome):
+            continue
+        # Nome de gente tem minúscula; sobra em caixa alta é sigla comprida.
+        if not re.search(r"[a-zà-ÿ]", nome):
+            continue
+        if not re.search(r"[A-Za-zÀ-ÿ]{2,}", nome):
+            continue
+        return nome
+    return None
+
 
 def chave_consenso(texto: str) -> ChaveConsenso | None:
     """Chave estruturada pra casar uma perna sem cobertura Pinnacle no consenso.
@@ -289,6 +378,8 @@ def chave_consenso(texto: str) -> ChaveConsenso | None:
     texto = texto.strip()
     if SEGUNDO_TEMPO.search(texto):
         return None
+    if _COMBINADO_POOL.search(texto) or COMBINADOS.search(texto):
+        return None
     motivo = _sem_cobertura(texto)
     if motivo is None:
         return None
@@ -297,7 +388,7 @@ def chave_consenso(texto: str) -> ChaveConsenso | None:
         return None
 
     periodo = "1t" if PRIMEIRO_TEMPO.search(texto) else "jogo"
-    corpo = _PREFIXO_PERIODO.sub("", texto).strip()
+    corpo = _QUALIFICADOR.sub("", _PREFIXO_PERIODO.sub("", texto).strip()).strip()
 
     m_familia = None
     for padrao, mot in SEM_COBERTURA:
@@ -309,20 +400,62 @@ def chave_consenso(texto: str) -> ChaveConsenso | None:
 
     escopo = periodo
     if m_familia:
-        # Entidade ANTES da palavra do mercado ("Lucas Barbosa Chutes no
-        # gol 1+") é nome de JOGADOR: casas escrevem prop de jogador assim.
+        # `consenso._normalizar` (não `matcher.normalizar`) pra nome de
+        # JOGADOR: este é normalizador genérico de rótulo, não afinado pra
+        # time — o `RUIDO` de `matcher.normalizar` come "jr"/"junior"/"u\d{2}",
+        # que corromperia nome de jogador. Import tardio: `consenso.py`
+        # importa este módulo no nível de topo (pro casamento canônico),
+        # então importar `consenso` aqui no topo do arquivo formaria ciclo —
+        # em tempo de chamada os dois módulos já terminaram de carregar.
+        from .consenso import _normalizar as _normalizar_rotulo
+
         antes = corpo[: m_familia.start()].strip()
         antes = re.sub(r"\b(de|do|da)\s*$", "", antes, flags=re.IGNORECASE).strip()
-        if antes and not _NAO_E_TIME.match(antes):
-            # `consenso._normalizar` (não `matcher.normalizar`): este é
-            # normalizador genérico de rótulo, não afinado pra time — o
-            # `RUIDO` de `matcher.normalizar` come "jr"/"junior"/"u\d{2}",
-            # que corromperia nome de jogador. Import tardio: `consenso.py`
-            # importa este módulo no nível de topo (pro casamento canônico),
-            # então importar `consenso` aqui no topo do arquivo formaria
-            # ciclo — em tempo de chamada os dois módulos já terminaram de
-            # carregar.
-            from .consenso import _normalizar as _normalizar_rotulo
+        depois = corpo[m_familia.end():].strip()
+
+        # "Al Ettifaq FC total cartões" / "Total (2.5) Chutes Ponte Preta": o
+        # "total" grudado no fim do nome é a palavra do mercado (e a linha
+        # entre parênteses, ruído). Descolar antes de decidir time vs.
+        # jogador — é o que fazia a primeira grafia sair como
+        # `jogador:al ettifaq fc total` (5.480 linhas no pool) em vez de
+        # `time:al ettifaq fc`.
+        antes_limpo = _PARENTESES.sub(" ", antes).strip()
+        antes_sem_total = _TOTAL_NO_FIM.sub("", antes_limpo).strip()
+        virou_total = antes_sem_total != antes_limpo
+
+        # Ordem: parêntese primeiro, porque quando ele existe é ele que tem o
+        # nome real ("Chutes a Gol do Jogador (Carles Alena (ALA))"); o texto
+        # em volta é qualificação.
+        jogador = _jogador_parentizado(corpo)
+        if jogador is None:
+            m_jog = _JOGADOR_APOS_MERCADO.match(depois)
+            if m_jog:
+                # "Chutes a Gol - Jesse Shaun Derry (ALA)" — sigla de time no
+                # fim não faz parte do nome.
+                jogador = _PARENTESES.sub("", m_jog.group(1)).strip() or None
+
+        if jogador:
+            norm = _normalizar_rotulo(jogador)
+            if norm:
+                escopo = f"jogador:{norm}"
+        elif virou_total and antes_sem_total and not _NAO_E_TIME.match(antes_sem_total):
+            # "<Time> total cartões" / "<Time> total de chutes a Gol".
+            norm = normalizar(antes_sem_total)
+            if norm:
+                escopo = f"time:{norm}"
+        elif virou_total and not antes_sem_total:
+            # "Total de chutes a Gol Deportivo Alavés": só a palavra do
+            # mercado antes, e a equipe depois. Sem nada depois ("Totais
+            # chutes a Gol") o escopo continua sendo o do JOGO, que é o certo.
+            m_time = _ENTIDADE_APOS_TOTAL.match(depois)
+            if m_time and m_time.group(1).strip():
+                norm = normalizar(_PARENTESES.sub(" ", m_time.group(1)).strip())
+                if norm:
+                    escopo = f"time:{norm}"
+        elif antes and not virou_total and not _NAO_E_TIME.match(antes):
+            # Entidade ANTES da palavra do mercado, sem "total" no meio
+            # ("Lucas Barbosa Chutes no gol 1+") é nome de JOGADOR: casas
+            # escrevem prop de jogador assim.
             norm = _normalizar_rotulo(antes)
             if norm:
                 escopo = f"jogador:{norm}"
@@ -330,7 +463,6 @@ def chave_consenso(texto: str) -> ChaveConsenso | None:
             # Entidade DEPOIS, como "do <Time>"/"da <Time>" ("Cartões do
             # Grêmio Mais de 1.5") é nome de TIME — grafia possessiva comum
             # nesta família de rótulo.
-            depois = corpo[m_familia.end():].strip()
             m_time = _ENTIDADE_APOS_MERCADO.match(depois)
             if m_time and m_time.group(1).strip():
                 norm = normalizar(m_time.group(1).strip())
@@ -353,6 +485,19 @@ def chave_consenso(texto: str) -> ChaveConsenso | None:
                 valor = None
             else:
                 lado, valor = None, None
+
+    # Sem `lado` a chave não identifica um DESFECHO, só um mercado — e
+    # `consenso._mercados_por_casa_canonico` escolhe a seleção pelo `lado`.
+    # Com `lado=None` ele pegava a primeira seleção do bloco, em ordem de
+    # dicionário. Medido no banco: a perna "Cartões 1x2: 2" (fora, La Serena,
+    # 2.08) casava com "universidade de concepcion" (casa, 2.45) em 7 casas —
+    # precificando o lado errado. Pior: "Cartões 1x2" e "Cartões exatos" são
+    # mercados diferentes e produziam a MESMA chave (cartoes/jogo/None/None).
+    #
+    # Recusar custa zero cobertura hoje (os únicos casamentos canônicos vivos
+    # são `lado="over"`) e fecha a porta pra um edge que mede a seleção errada.
+    if lado is None:
+        return None
 
     return ChaveConsenso(familia=familia, escopo=escopo, lado=lado, linha=valor)
 

@@ -500,20 +500,37 @@ class ProvedorConsenso:
 
         linhas = self.storage.mercados_para_consenso(
             self.evento_id, config.CONSENSO_JANELA_HORAS)
-        if not linhas and self.evento and self.inicio_evento:
-            # A busca literal pelo `evento_id` da própria oferta não achou
-            # nada — esperado pra casa não-Altenar. Tenta achar o `evento_id`
-            # certo do pool via nome+data (`Storage.resolver_evento_consenso`,
-            # que reusa `matcher.encontrar_evento`) e refaz a busca literal
-            # com ele.
+        if self._so_a_propria_casa(linhas) and self.evento and self.inicio_evento:
+            # A busca literal pelo `evento_id` da própria oferta não trouxe
+            # NENHUMA outra casa — esperado pra casa não-Altenar. Tenta achar
+            # o `evento_id` certo do pool via nome+data
+            # (`Storage.resolver_evento_consenso`, que reusa
+            # `matcher.encontrar_evento`) e refaz a busca literal com ele.
             evento_id_pool = self.storage.resolver_evento_consenso(
                 self.evento, self.inicio_evento, config.CONSENSO_JANELA_HORAS)
             if evento_id_pool:
-                linhas = self.storage.mercados_para_consenso(
+                do_pool = self.storage.mercados_para_consenso(
                     evento_id_pool, config.CONSENSO_JANELA_HORAS)
+                if do_pool:
+                    linhas = do_pool
 
         self._cache = linhas
         return self._cache
+
+    def _so_a_propria_casa(self, linhas: list[dict]) -> bool:
+        """Não há referência POSSÍVEL nestas linhas — nenhuma é de outra casa.
+
+        Era `not linhas` antes, e por isso a ponte fuzzy morreu quando a
+        Betano virou writer de `mercados_casa`: as linhas dela vêm sob o
+        `evento_id` DELA, então a busca literal passou a voltar não-vazia, a
+        ponte nunca disparava, e `excluir_casa` esvaziava tudo logo depois.
+        Medido no banco: 24 ofertas da Betano nessa situação, todas com o
+        evento certo achável no pool pela ponte.
+
+        Vale pra qualquer casa que vire writer, não só a Betano — a condição
+        é sobre o conteúdo das linhas, não sobre o nome da casa.
+        """
+        return not any(linha["casa"] != self.casa for linha in linhas)
 
     def prob_para(self, texto_perna: str) -> ResultadoConsenso | None:
         """Consenso para uma perna crua.
@@ -533,11 +550,16 @@ class ProvedorConsenso:
         linhas = self._linhas()
         if not linhas:
             return None
+        chave = chave_consenso(texto_perna)
         if ":" in texto_perna:
+            # `chave_alvo` vai junto como FALLBACK, não como substituto:
+            # `calcular` só recorre a ela quando o casamento literal não formou
+            # nenhum mercado. Sem isto, o ramo com ":" nunca chegava ao
+            # casamento canônico — 175 pernas medidas no banco falhavam o
+            # literal e paravam ali, com o fallback virando código morto.
             market_nome, _, selecao = texto_perna.partition(":")
             return calcular(linhas, market_nome.strip(), selecao.strip(),
-                            excluir_casa=self.casa)
-        chave = chave_consenso(texto_perna)
+                            excluir_casa=self.casa, chave_alvo=chave)
         if chave is None:
             return None
         return calcular(linhas, "", "", excluir_casa=self.casa, chave_alvo=chave)
