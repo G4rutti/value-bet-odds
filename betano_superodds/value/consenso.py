@@ -513,39 +513,46 @@ class ProvedorConsenso:
         if self._cache is not None:
             return self._cache
 
-        linhas = self.storage.mercados_para_consenso(
+        literal = self.storage.mercados_para_consenso(
             self.evento_id, config.CONSENSO_JANELA_HORAS)
-        if self._so_a_propria_casa(linhas) and self.evento and self.inicio_evento:
-            # A busca literal pelo `evento_id` da própria oferta não trouxe
-            # NENHUMA outra casa — esperado pra casa não-Altenar. Tenta achar
-            # o `evento_id` certo do pool via nome+data
-            # (`Storage.resolver_evento_consenso`, que reusa
-            # `matcher.encontrar_evento`) e refaz a busca literal com ele.
-            evento_id_pool = self.storage.resolver_evento_consenso(
-                self.evento, self.inicio_evento, config.CONSENSO_JANELA_HORAS)
-            if evento_id_pool:
-                do_pool = self.storage.mercados_para_consenso(
-                    evento_id_pool, config.CONSENSO_JANELA_HORAS)
-                if do_pool:
-                    linhas = do_pool
 
-        self._cache = linhas
+        # Linhas do MESMO jogo sob os outros `evento_id` do pool. Cada fonte
+        # escreve sob o id dela — as Altenar compartilham o seu, a Betano tem
+        # o próprio, a Superbet idem —, então buscar por um id só entrega uma
+        # família de feed por vez. Medido em 2026-08-14: os 347 eventos do
+        # pool tinham exatamente UMA família cada, e os 8 eventos da Superbet
+        # estavam TODOS também sob outro id, com 4 a 11 casas do outro lado.
+        # Sem esta união a fonte independente fica no banco sem nunca ser
+        # somada, e `CONSENSO_MIN_FAMILIAS=2` é impossível por construção.
+        do_jogo: list[dict] = []
+        if self.evento and self.inicio_evento:
+            do_jogo = self.storage.mercados_para_consenso_do_jogo(
+                self.evento, self.inicio_evento, config.CONSENSO_JANELA_HORAS)
+
+        self._cache = self._unir(literal, do_jogo)
         return self._cache
 
-    def _so_a_propria_casa(self, linhas: list[dict]) -> bool:
-        """Não há referência POSSÍVEL nestas linhas — nenhuma é de outra casa.
+    @staticmethod
+    def _unir(*grupos: list[dict]) -> list[dict]:
+        """Concatena sem repetir a MESMA linha.
 
-        Era `not linhas` antes, e por isso a ponte fuzzy morreu quando a
-        Betano virou writer de `mercados_casa`: as linhas dela vêm sob o
-        `evento_id` DELA, então a busca literal passou a voltar não-vazia, a
-        ponte nunca disparava, e `excluir_casa` esvaziava tudo logo depois.
-        Medido no banco: 24 ofertas da Betano nessa situação, todas com o
-        evento certo achável no pool pela ponte.
-
-        Vale pra qualquer casa que vire writer, não só a Betano — a condição
-        é sobre o conteúdo das linhas, não sobre o nome da casa.
+        A ponte pode devolver o próprio `evento_id` da oferta entre os ids do
+        jogo (é o caso normal de casa Altenar), e aí a linha viria duas vezes.
+        Duplicata não muda a mediana — `_mercados_por_casa` guarda um bloco
+        por casa —, mas infla `capturados` e portanto a idade reportada do
+        consenso, que é diagnóstico que o dono lê.
         """
-        return not any(linha["casa"] != self.casa for linha in linhas)
+        vistas: set[tuple] = set()
+        saida: list[dict] = []
+        for grupo in grupos:
+            for linha in grupo:
+                chave = (linha.get("casa"), str(linha.get("market_id")),
+                         linha.get("selecao"), linha.get("capturado_em"))
+                if chave in vistas:
+                    continue
+                vistas.add(chave)
+                saida.append(linha)
+        return saida
 
     def prob_para(self, texto_perna: str) -> ResultadoConsenso | None:
         """Consenso para uma perna crua.

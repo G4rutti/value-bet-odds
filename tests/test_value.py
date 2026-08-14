@@ -2725,35 +2725,41 @@ class TestPonteDeEvento(unittest.TestCase):
 
 
 class StoragePorEvento:
-    """`StorageFake` que responde DIFERENTE por `evento_id`, mais a ponte.
+    """`StorageFake` que responde DIFERENTE por `evento_id`, mais a união.
 
     O `StorageFake` devolve as mesmas linhas pra qualquer id, então não serve
-    pra testar quando a ponte dispara — é justamente a diferença entre o id da
-    própria casa e o id do pool que está em jogo.
+    pra testar a união entre espaços de `evento_id` — é justamente a diferença
+    entre o id da própria casa e os ids das outras fontes que está em jogo.
     """
 
-    def __init__(self, por_id: dict[str, list[dict]], ponte: str | None) -> None:
+    def __init__(self, por_id: dict[str, list[dict]],
+                 do_jogo: list[str] | None = None) -> None:
         self.por_id = por_id
-        self.ponte = ponte
+        # Ids que a ponte considera "o mesmo jogo".
+        self.do_jogo = list(do_jogo or [])
         self.ponte_consultada = False
 
     def mercados_para_consenso(self, evento_id: str, janela_horas: float):
         return list(self.por_id.get(str(evento_id), []))
 
-    def resolver_evento_consenso(self, evento, inicio_evento, janela_horas):
+    def mercados_para_consenso_do_jogo(self, evento, inicio_evento, janela_horas):
         self.ponte_consultada = True
-        return self.ponte
+        linhas: list[dict] = []
+        for eid in self.do_jogo:
+            linhas += list(self.por_id.get(eid, []))
+        return linhas
 
 
-class TestPonteQuandoSoTemAPropriaCasa(unittest.TestCase):
-    """A ponte fuzzy tem que disparar quando o `evento_id` literal só traz a
-    CASA AVALIADA — não só quando não traz nada.
+class TestUniaoEntreEspacosDeEventoId(unittest.TestCase):
+    """Cada fonte escreve em `mercados_casa` sob o `evento_id` DELA: as 11
+    Altenar compartilham o seu, a Betano tem o próprio, a Superbet idem.
+    Buscar por um id só entrega uma família de feed por vez.
 
-    Desde que a Betano virou writer de `mercados_casa`, as linhas dela vêm sob
-    o `evento_id` dela: a busca literal passou a voltar não-vazia, a ponte
-    (que só olhava `not linhas`) nunca disparava, e `excluir_casa="Betano"`
-    esvaziava tudo logo depois. Medido no banco: 24 ofertas nessa situação,
-    todas com o evento certo achável no pool.
+    Medido em 2026-08-14: os 347 eventos do pool tinham exatamente UMA família
+    cada, e os 8 eventos da Superbet estavam TODOS também sob outro
+    `evento_id`, com 4 a 11 casas do outro lado. Fonte independente deitada no
+    banco sem nunca ser somada — e `CONSENSO_MIN_FAMILIAS=2` impossível de
+    ligar por construção, não por falta de fonte.
     """
 
     def _pool_com_seis_casas(self) -> list[dict]:
@@ -2764,46 +2770,62 @@ class TestPonteQuandoSoTemAPropriaCasa(unittest.TestCase):
                 + _linhas_casa("4Play", 1.87, 1.93)
                 + _linhas_casa("GingaBet", 1.93, 1.87))
 
-    def test_so_a_propria_casa_dispara_a_ponte(self):
+    def test_linhas_de_outro_id_entram_no_mesmo_consenso(self):
+        """O caso da Betano: as linhas dela vêm sob o id dela, e depois de
+        `excluir_casa` não sobra nada — a menos que o pool do MESMO jogo,
+        sob outro id, seja unido."""
         storage = StoragePorEvento(
             {"betano-1": _linhas_casa("Betano", 2.00, 1.80),
              "pool-9": self._pool_com_seis_casas()},
-            ponte="pool-9")
+            do_jogo=["pool-9"])
         provedor = consenso.ProvedorConsenso(
             storage, evento_id="betano-1", casa="Betano",
             evento="Flamengo - Palmeiras", inicio_evento=HOJE.isoformat())
 
         r = provedor.prob_para("Total de cartões 3.5: Mais de 3.5")
 
-        self.assertTrue(storage.ponte_consultada, "a ponte nem foi tentada")
-        self.assertIsNotNone(r, "com o pool achado o consenso tinha que formar")
+        self.assertTrue(storage.ponte_consultada, "a união nem foi tentada")
+        self.assertIsNotNone(r, "com o pool unido o consenso tinha que formar")
         self.assertEqual(r.n_casas, 6)
         self.assertNotIn("Betano", r.casas, "a casa avaliada não é referência de si")
 
-    def test_com_outra_casa_no_id_literal_a_ponte_nao_e_chamada(self):
-        """Regressão: o caminho que já funcionava não pode pagar a varredura
-        da ponte. Basta UMA linha de outra casa pra referência ser possível."""
+    def test_familias_diferentes_se_somam_no_mesmo_evento(self):
+        """O ponto da Superbet: ela só vale se as linhas dela puderem entrar
+        no mesmo consenso das Altenar, e elas moram em ids diferentes."""
         storage = StoragePorEvento(
-            {"alt-1": self._pool_com_seis_casas() + _linhas_casa("Betano", 2.0, 1.8)},
-            ponte="pool-9")
+            {"alt-1": self._pool_com_seis_casas(),
+             "sb-7": _linhas_casa("Superbet", 1.85, 1.95)},
+            do_jogo=["alt-1", "sb-7"])
         provedor = consenso.ProvedorConsenso(
             storage, evento_id="alt-1", casa="Betano",
             evento="Flamengo - Palmeiras", inicio_evento=HOJE.isoformat())
 
         r = provedor.prob_para("Total de cartões 3.5: Mais de 3.5")
 
-        self.assertFalse(storage.ponte_consultada)
-        self.assertEqual(r.n_casas, 6)
+        self.assertEqual(r.n_casas, 7)
+        self.assertIn("Superbet", r.casas)
+        self.assertEqual(r.n_familias, 2, "altenar + Superbet")
 
-    def test_ponte_que_nao_resolve_mantem_as_linhas_originais(self):
-        """Sem evento no pool, nada de trocar o que já se tinha por vazio."""
+    def test_linha_repetida_nao_conta_duas_vezes(self):
+        """A ponte devolve o próprio `evento_id` da oferta entre os ids do
+        jogo (caso normal de casa Altenar). Duplicata não muda a mediana, mas
+        infla `capturados` e portanto a idade reportada do consenso."""
         storage = StoragePorEvento(
-            {"betano-1": _linhas_casa("Betano", 2.00, 1.80)}, ponte=None)
+            {"alt-1": self._pool_com_seis_casas()}, do_jogo=["alt-1"])
         provedor = consenso.ProvedorConsenso(
-            storage, evento_id="betano-1", casa="Betano",
+            storage, evento_id="alt-1", casa="Betano",
             evento="Flamengo - Palmeiras", inicio_evento=HOJE.isoformat())
 
-        self.assertEqual(len(provedor._linhas()), 2)
+        self.assertEqual(len(provedor._linhas()), 12, "6 casas x 2 lados")
+
+    def test_sem_identidade_de_evento_usa_so_o_id_literal(self):
+        """Oferta sem nome/kickoff não pode acionar a ponte — sem data dos
+        dois lados o matcher cai no modo mais frouxo."""
+        storage = StoragePorEvento(
+            {"alt-1": self._pool_com_seis_casas()}, do_jogo=["alt-1"])
+        provedor = consenso.ProvedorConsenso(storage, evento_id="alt-1")
+        provedor._linhas()
+        self.assertFalse(storage.ponte_consultada)
 
 
 class TestPonteDeEventoNoStorage(unittest.TestCase):

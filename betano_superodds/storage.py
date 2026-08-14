@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,6 +13,7 @@ from .models import MercadoCasa, Offer
 from .value import matcher as _matcher
 from .value.pool_eventos import montar_matchups as _montar_matchups
 from .value.pool_eventos import resolver_evento_id as _resolver_evento_id
+from .value.pool_eventos import resolver_evento_ids as _resolver_evento_ids
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS offers (
@@ -99,6 +101,28 @@ CREATE TABLE IF NOT EXISTS avaliacoes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_avaliacoes_em ON avaliacoes(avaliado_em);
+
+-- Veredito da curadoria estruturada (`value/curadoria.py`) por versão de
+-- oferta — gravado MESMO em modo sombra e MESMO pra oferta que não chegou a
+-- virar alerta, porque é isso que permite depois perguntar "das que enviei
+-- com veredito 'vetado', quantas deram red?" (join com `liquidacoes` por
+-- `offer_id`, ver `query.py --curadoria`). PK igual a `avaliacoes`: o
+-- veredito é sobre uma VERSÃO específica da oferta (mesma odd), não sobre a
+-- oferta ao longo do tempo.
+CREATE TABLE IF NOT EXISTS veredito_curadoria (
+    offer_id            TEXT NOT NULL,
+    content_hash        TEXT NOT NULL,
+    decisao             TEXT NOT NULL,   -- aprovado | degrau | vetado
+    motivo              TEXT,
+    confianca_original  TEXT,
+    confianca_final      TEXT,
+    modo                TEXT NOT NULL,   -- sombra | enforce (o que ESTE registro usou)
+    sinais_json         TEXT,
+    avaliado_em         TEXT NOT NULL,
+    PRIMARY KEY (offer_id, content_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_veredito_curadoria_decisao ON veredito_curadoria(decisao);
 
 -- Mercados completos das casas, para a referência de consenso.
 --
@@ -247,6 +271,11 @@ class Storage:
         # Memoiza também os negativos (`None`): é isso que evita pagar N×M
         # (ofertas × eventos do pool) pelas ofertas que nunca vão casar.
         self._pool_cache: dict[tuple[str, str], str | None] = {}
+        # Mesma chave, valor diferente: TODOS os ids do jogo, não só o melhor
+        # (ver `mercados_para_consenso_do_jogo`). Cache separado porque a lista
+        # vazia é resposta legítima e não pode ser confundida com "não
+        # memoizado".
+        self._pool_cache_multi: dict[tuple[str, str], list[str]] = {}
 
     def _migrar(self) -> None:
         """Colunas novas em banco já existente.
@@ -436,6 +465,39 @@ class Storage:
         self._pool_cache[chave] = resultado
         return resultado
 
+    def mercados_para_consenso_do_jogo(self, evento: str | None,
+                                       inicio_evento: str | None,
+                                       janela_horas: float) -> list[dict]:
+        """Linhas de TODOS os `evento_id` do pool que são o mesmo jogo.
+
+        Cada fonte escreve sob o `evento_id` dela: as Altenar compartilham o
+        seu, a Betano tem o próprio, a Superbet idem. Buscar por um id só
+        entrega uma família de feed por vez — medido em 2026-08-14, os 347
+        eventos do pool tinham exatamente UMA família cada, com fontes
+        independentes deitadas no banco sem nunca se somarem.
+
+        Mesmo cache de `resolver_evento_consenso`, com chave própria porque o
+        valor é outro (lista, não id único).
+        """
+        if not evento or not inicio_evento:
+            return []
+
+        if self._pool_matchups is None:
+            self._pool_matchups = _montar_matchups(self.eventos_do_pool(janela_horas))
+
+        chave = self._chave_cache_pool(evento, inicio_evento)
+        if chave is None:
+            return []
+        ids = self._pool_cache_multi.get(chave)
+        if ids is None:
+            ids = _resolver_evento_ids(evento, inicio_evento, self._pool_matchups)
+            self._pool_cache_multi[chave] = ids
+
+        linhas: list[dict] = []
+        for evento_id in ids:
+            linhas += self.mercados_para_consenso(evento_id, janela_horas)
+        return linhas
+
     @staticmethod
     def _chave_cache_pool(evento: str, inicio_evento: str) -> tuple[str, str] | None:
         """`(nome normalizado, kickoff arredondado à hora)` — colapsa as várias
@@ -451,6 +513,7 @@ class Storage:
         mudar — hoje, só depois de `salvar_mercados_casa` (ver `main.py`)."""
         self._pool_matchups = None
         self._pool_cache = {}
+        self._pool_cache_multi = {}
 
     def limpar_mercados_casa(self, mais_velhos_que_horas: float) -> int:
         """Poda o que já não serve pra consenso — a tabela cresce rápido."""
@@ -790,6 +853,37 @@ class Storage:
                     status      = excluded.status
                 """,
                 (offer_id, content_hash, _now(), status),
+            )
+
+    def registrar_veredito_curadoria(self, offer_id: str, content_hash: str,
+                                     veredito) -> None:
+        """Grava o veredito de `curadoria.avaliar` — mesmo em modo sombra.
+
+        Recebe o `Veredito` inteiro (não campos soltos) porque quem chama
+        (`alerts.py`) já tem o objeto pronto, e `sinais` é um dict livre que
+        não vale a pena espalhar em parâmetros posicionais.
+        """
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO veredito_curadoria
+                       (offer_id, content_hash, decisao, motivo,
+                        confianca_original, confianca_final, modo,
+                        sinais_json, avaliado_em)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(offer_id, content_hash) DO UPDATE SET
+                    decisao             = excluded.decisao,
+                    motivo              = excluded.motivo,
+                    confianca_original  = excluded.confianca_original,
+                    confianca_final     = excluded.confianca_final,
+                    modo                = excluded.modo,
+                    sinais_json         = excluded.sinais_json,
+                    avaliado_em         = excluded.avaliado_em
+                """,
+                (offer_id, content_hash, veredito.decisao, veredito.motivo,
+                 veredito.confianca_original, veredito.confianca_final,
+                 veredito.modo, json.dumps(veredito.sinais, ensure_ascii=False),
+                 _now()),
             )
 
     def get_estado(self, chave: str) -> str | None:

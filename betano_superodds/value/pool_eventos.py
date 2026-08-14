@@ -90,6 +90,45 @@ def resolver_evento_id(evento: str, inicio_evento: str | None,
     return resultado.event_id if resultado is not None else None
 
 
+def resolver_evento_ids(evento: str, inicio_evento: str | None,
+                        matchups: list[Matchup]) -> list[str]:
+    """TODOS os `evento_id` do pool que são o mesmo jogo — não só o melhor.
+
+    Por que não basta o melhor
+    ──────────────────────────
+    Cada fonte escreve em `mercados_casa` sob o `evento_id` DELA. As 11 casas
+    Altenar compartilham o id entre si (por isso empilham), mas a Betano tem o
+    seu e a Superbet tem o seu. Medido em 2026-08-14: os 8 eventos da Superbet
+    no pool estavam TODOS também sob outro `evento_id`, com 4 a 11 casas
+    Altenar do outro lado — e `Storage.mercados_para_consenso` busca por
+    igualdade de `evento_id`, então as linhas nunca se encontravam.
+
+    O efeito é que todo evento do pool tinha exatamente UMA família de feed
+    (347 de 347). Fontes independentes existiam no banco e não se somavam:
+    era `CONSENSO_MIN_FAMILIAS=2` impossível de ligar por construção, não por
+    falta de fonte.
+
+    Cada id devolvido passou pelo MESMO casamento do resolvedor de um só
+    (score e janela de `CONSENSO_MATCH_*`, com os vetos de UF e gênero de
+    `matcher.encontrar_evento`). Unir é o que junta as famílias; afrouxar o
+    critério pra unir mais seria trocar cobertura por referência do jogo
+    errado, que é o oposto do objetivo.
+    """
+    if not evento or not inicio_evento or _parse_data(inicio_evento) is None:
+        return []
+
+    ids: list[str] = []
+    for candidato in matchups:
+        achado = encontrar_evento(
+            evento, inicio_evento, [candidato],
+            min_score=config.CONSENSO_MATCH_MIN_SCORE,
+            max_horas=config.CONSENSO_MATCH_MAX_HORAS,
+        )
+        if achado is not None and achado.event_id not in ids:
+            ids.append(achado.event_id)
+    return ids
+
+
 def resolver_evento_id_via_pool(evento: str, inicio_evento: str | None,
                                  pool: list[dict]) -> str | None:
     """`evento_id` do pool que corresponde a `evento`/`inicio_evento`, ou None.
