@@ -235,6 +235,18 @@ ALTENAR_JANELA_SONDA = int(os.getenv("ALTENAR_JANELA_SONDA", "48"))
 # é decisão do dono, com o funil por causa do log na mão (`pipeline.py`).
 ALTENAR_DETALHES_FILA = int(os.getenv("ALTENAR_DETALHES_FILA", "4"))
 
+# --- Superbet: fonte de REFERÊNCIA, não de oferta --------------------------
+# Ver o cabeçalho de `superbet.py`. Ela existe pra ser a TERCEIRA família de
+# feed do pool de consenso (hoje só há `altenar` e `betano`), que é o que torna
+# `CONSENSO_MIN_FAMILIAS=2` ligável.
+ENABLE_SUPERBET = os.getenv("ENABLE_SUPERBET", "1") not in ("0", "false", "False")
+
+# Detalhes por ciclo. Mais alto que o teto da Altenar (12) porque aqui o
+# orçamento não é dividido com caça a boost — a Superbet não é fonte de oferta,
+# então cada request vira pool puro. E ela é UMA casa, não um rodízio de 11:
+# o que ela não sondar neste ciclo não é compensado por nenhuma irmã.
+SUPERBET_MAX_DETALHES = int(os.getenv("SUPERBET_MAX_DETALHES", "8"))
+
 # Até quantas horas à frente vale gastar request de detalhe.
 #
 # A janela de sondagem é cara (12 detalhes por casa, e a casa só volta a cada

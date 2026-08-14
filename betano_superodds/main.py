@@ -18,6 +18,7 @@ from .diff import DiffResult, diff_offers
 from .esportiva import EsportivaScraper
 from .novibet import NovibetScraper
 from .sportingtech import CASAS_SPORTINGTECH, SportingTechScraper
+from .superbet import SuperbetScraper
 from .notifier import TelegramNotifier
 from .revalidacao import revalidar_oferta
 from .scraper import BetanoScraper, ScraperError
@@ -218,6 +219,22 @@ async def coletar(
         except Exception as exc:  # noqa: BLE001 — mesma política das outras casas
             dt_casa = time.monotonic() - tc
             log.warning("Novibet falhou neste ciclo (%.1fs): %s", dt_casa, exc)
+
+    # Superbet: NÃO entra em `raspadas` e não soma em `offers` — ela não é
+    # fonte de oferta (a rota do boost dela nunca foi achada), é a terceira
+    # família de feed do pool de consenso. Pôr o nome dela em `raspadas` faria
+    # o diff expirar ofertas de uma casa que nunca produziu oferta nenhuma.
+    if config.ENABLE_SUPERBET:
+        tc = time.monotonic()
+        try:
+            async with SuperbetScraper(alvos=alvos) as sc:
+                await sc.scrape()
+                mercados += sc.mercados_vistos
+            log.info("Superbet: %d mercado(s) p/ consenso em %.1fs",
+                     len(sc.mercados_vistos), time.monotonic() - tc)
+        except Exception as exc:  # noqa: BLE001 — mesma política das outras casas
+            log.warning("Superbet falhou neste ciclo (%.1fs): %s",
+                        time.monotonic() - tc, exc)
 
     if config.ENABLE_SPORTINGTECH:
         for casa_st in CASAS_SPORTINGTECH:
