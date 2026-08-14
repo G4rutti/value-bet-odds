@@ -2348,6 +2348,151 @@ class TestTotaisPorEquipe(unittest.TestCase):
     def test_escanteios_do_jogo_continuam_na_chave_antiga(self):
         self.assertEqual(parse_leg("Escanteios Mais de 9.5").market_key, "corners:9.5")
 
+    def test_grafia_sem_a_palavra_total(self):
+        """"Náutico Mais de 1.5 Gols" (EstrelaBet): o time vem na frente e
+        "Gols" fica DEPOIS da linha. Caía em "mercado não reconhecido"."""
+        leg = parse_leg("Flamengo Mais de 1.5 Gols")
+        self.assertTrue(leg.suportado)
+        self.assertEqual(leg.market_key, "team_total:{lado}:1.5")
+        self.assertEqual(leg.time_nome, "Flamengo")
+
+    def test_grafia_sem_total_respeita_o_primeiro_tempo(self):
+        self.assertEqual(
+            parse_leg("Flamengo Mais de 0.5 Gols no 1º Tempo").market_key,
+            "team_total_1t:{lado}:0.5")
+
+    def test_combo_multi_jogo_nao_vira_total_de_equipe(self):
+        """"Mais de 2.5 Gols Em Todas as Partidas" não nomeia time nenhum —
+        a âncora à esquerda mais `_NAO_E_TIME` são o que impede a grafia nova
+        de inventar uma equipe de nome vazio."""
+        self.assertFalse(parse_leg("Mais de 2.5 Gols Em Todas as Partidas").suportado)
+
+
+class TestDrawNoBet(unittest.TestCase):
+    """"Empate devolve aposta" (EstrelaBet) — 1.296 linhas em 11 casas no
+    pool, e a Pinnacle PUBLICA o mercado: `dnb`/`dnb_1t` já estavam em
+    `SPECIAL_KEYS` e em `_PREFIXOS_LADO_SEM_SUFIXO`. Só o rótulo não chegava.
+    """
+
+    def test_jogo_inteiro_com_nome_de_time(self):
+        leg = parse_leg("Empate devolve aposta: Norwich")
+        self.assertTrue(leg.suportado)
+        self.assertEqual(leg.market_key, "dnb")
+        self.assertEqual(leg.time_nome, "Norwich")
+
+    def test_primeiro_tempo_ganha_chave_propria(self):
+        self.assertEqual(
+            parse_leg("1º tempo - empate devolve aposta: Dallas Wings (F)").market_key,
+            "dnb_1t")
+
+    def test_lado_por_numero(self):
+        self.assertEqual(parse_leg("Empate devolve aposta: 1").selecao, "home")
+        self.assertEqual(parse_leg("Empate devolve aposta: 2").selecao, "away")
+
+    def test_quarto_nao_colapsa_pro_jogo_inteiro(self):
+        """A Pinnacle só publica período 0 e 1 — quarto não tem equivalente, e
+        `_sufixo()` devolveria "" pra ele, casando contra o JOGO INTEIRO.
+        Mesma armadilha do 2º tempo, outra granularidade."""
+        leg = parse_leg("Primeiro quarto - empate devolve aposta: Dallas Wings (F)")
+        self.assertFalse(leg.suportado)
+        self.assertIn("quarto", leg.motivo)
+
+    def test_segundo_tempo_continua_recusado(self):
+        self.assertFalse(parse_leg("2º tempo - empate devolve aposta: Sport").suportado)
+
+    def test_empate_nao_e_selecao_valida(self):
+        """Num mercado que devolve a aposta no empate não existe lado
+        "empate" — aceitar viraria um `h2h` disfarçado."""
+        self.assertFalse(parse_leg("Empate devolve aposta: Empate").suportado)
+
+
+class TestFamiliasNovasDeConsenso(unittest.TestCase):
+    """Mercados sem Pinnacle que o POOL publica — verificados em
+    `mercados_casa` antes de entrar em `SEM_COBERTURA`, como manda o cabeçalho
+    de `market_parser.py`. Sem entrada em `_FAMILIA_POR_MOTIVO` a perna vira
+    "sem cobertura" e perde o resgate do consenso, que era o que acontecia
+    enquanto elas caíam em "mercado não reconhecido".
+    """
+
+    def test_defesas_do_goleiro_tem_familia(self):
+        leg = parse_leg("Facundo Sanguinetti Defesas do goleiro 4+")
+        self.assertFalse(leg.suportado)
+        self.assertEqual(leg.motivo, "defesas do goleiro")
+        self.assertIsNotNone(leg.consenso_chave)
+        self.assertEqual(leg.consenso_chave.familia, "defesas_goleiro")
+        self.assertEqual(leg.consenso_chave.escopo, "jogador:facundo sanguinetti")
+
+    def test_defesas_do_goleiro_casa_com_a_grafia_do_pool(self):
+        """No pool o jogador vem entre parênteses: "Total de Defesas do
+        Goleiro (Thiago Couto) (incl. Prorrogação)", em 9 casas."""
+        self.assertEqual(
+            chave_consenso("Total de Defesas do Goleiro (Thiago Couto) "
+                           "(incl. Prorrogação) Mais de 3.5"),
+            chave_consenso("Thiago Couto Defesas do goleiro 4+"))
+
+    def test_impedimentos_por_equipe(self):
+        leg = parse_leg("Ponte Preta total de impedimentos: Menos de 2.5")
+        self.assertFalse(leg.suportado)
+        self.assertEqual(leg.motivo, "impedimentos")
+        self.assertEqual(leg.consenso_chave.familia, "impedimentos")
+        self.assertEqual(leg.consenso_chave.escopo, "time:ponte preta")
+
+
+class TestGrafiasQueSoFaltavamRotulo(unittest.TestCase):
+    """Famílias que o projeto já recusava, em grafias que caíam em "mercado
+    não reconhecido" — 109 pernas no banco vivo. Rotular certo não inventa
+    cobertura, mas tira o ruído do balde e devolve o resgate por consenso pras
+    que TÊM família (o caso do "Marcar ou Dar Assistência")."""
+
+    def test_vencer_ambos_os_tempos_da_estrelabet(self):
+        for rotulo in ("Sport para vencer ambos tempos: Sim",
+                       "Ponte Preta para vencer um dos tempos: Não",
+                       "Equipe Ganhar ambos os Tempos: Middlesbrough"):
+            leg = parse_leg(rotulo)
+            self.assertFalse(leg.suportado, rotulo)
+            self.assertIn("conjunta entre tempos", leg.motivo, rotulo)
+
+    def test_marcar_ou_dar_assistencia_volta_pra_familia_artilheiro(self):
+        leg = parse_leg("Jean Carlos Para Marcar ou Dar Assistência")
+        self.assertEqual(leg.motivo, "artilheiro (prop de jogador)")
+        self.assertEqual(leg.consenso_chave, None,
+                         "sem lado/linha no rótulo a chave tem que ser recusada")
+
+    def test_primeiro_e_ultimo_a_marcar(self):
+        self.assertIn("primeiro a marcar", parse_leg("Primeiro gol: Náutico").motivo)
+        self.assertEqual(parse_leg("Ultimo a marcar: Botafogo-SP").motivo,
+                         "sequência de gols")
+
+    def test_mma_e_recusado_enquanto_o_esporte_nao_e_carregado(self):
+        """A Pinnacle publica MMA, mas `jogos_normalizados` só carrega
+        basketball/soccer/tennis — não há jogo do nosso lado pra comparar."""
+        for rotulo in ("Método de vitória: Islam Makhachev Vencer por Submissão",
+                       "Total de Rodadas: Mais de 2,5",
+                       "Rodada em que a luta terminará: Rodada 1"):
+            self.assertIn("MMA", parse_leg(rotulo).motivo, rotulo)
+
+    def test_placar_em_algum_momento_nao_e_placar_final(self):
+        """"Resultado Correto a qualquer momento: 1 - 2" é bem mais provável
+        que o placar FINAL 1-2 — casar com `correct_score` inflaria o edge."""
+        leg = parse_leg("Resultado Correto a qualquer momento: 1 - 2")
+        self.assertFalse(leg.suportado)
+        self.assertNotEqual(leg.market_key, "correct_score")
+
+
+class TestTotalDeSetsEGamesDoSet(unittest.TestCase):
+    def test_set_por_numero_com_ordinal(self):
+        """"1° Set - Total de Games: Mais de 9,5" (EstrelaBet) — terceira
+        grafia do mesmo `games_s1` que o parser já cobria por extenso."""
+        leg = parse_leg("1° Set - Total de Games: Mais de 9,5")
+        self.assertTrue(leg.suportado)
+        self.assertEqual(leg.market_key, "games_s1:9.5")
+        self.assertEqual(leg.selecao, "over")
+
+    def test_total_de_sets_da_partida(self):
+        leg = parse_leg("Total de Sets: Mais de 2,5")
+        self.assertTrue(leg.suportado)
+        self.assertEqual(leg.market_key, "sets_total:2.5")
+
 
 class TestTabelaDeConfianca(unittest.TestCase):
     """A tabela de fonte/threshold/confiança por tipo de mercado (skill

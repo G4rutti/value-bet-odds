@@ -37,7 +37,27 @@ SEPARADOR_PERNAS = " + "
 SEM_COBERTURA: tuple[tuple[str, str], ...] = (
     (r"cart(õ|o)es|cart(ã|a)o", "cartões"),
     (r"chutes?\s+(no|a|ao)\s+gol", "chutes no gol"),
+    # Defesas do goleiro — prop de jogador, e a Pinnacle não publica prop de
+    # jogador nenhum no futebol (mesma verificação de API do artilheiro). O
+    # pool cobre bem: "Total de Defesas do Goleiro (<Jogador>) (incl.
+    # Prorrogação)" em 9 casas.
+    #
+    # ⚠️ O rótulo do pool inclui prorrogação e o da oferta (Betano) não diz
+    # nada. Em liga não existe prorrogação e a diferença é exatamente zero;
+    # em mata-mata a referência fica um tico mais ampla que a oferta, o que
+    # infla o edge de leve. Aceito com o olho aberto: a família já cai no
+    # threshold de prop (30%) e no tier de confiança baixa.
+    (r"defesas?\s+d[oe]\s+goleiro", "defesas do goleiro"),
+    # Impedimentos — idem, sem Pinnacle. O pool tem "Total de Impedimentos" e
+    # "<Time> total de impedimentos", mas só em 3-4 casas: hoje fica abaixo de
+    # `CONSENSO_MIN_CASAS_PROP` e não forma. Entra assim mesmo pra parar de
+    # cair em "mercado não reconhecido" e pra formar sozinho quando o pool
+    # crescer (Etapa da sonda).
+    (r"impedimentos?", "impedimentos"),
     (r"marcar\s+(em\s+qualquer\s+momento|a\s+qualquer)", "artilheiro (prop de jogador)"),
+    # "Jean Carlos Para Marcar ou Dar Assistência" (EstrelaBet) — mesmo
+    # mercado do "gol ou assistência" logo abaixo, outra grafia.
+    (r"marcar\s+ou\s+dar\s+assist(ê|è|e)ncia", "artilheiro (prop de jogador)"),
     # "Gol ou Assistência: <Jogador> (<Time>)" — Novibet. Mesma família do
     # artilheiro: a Pinnacle não publica prop de jogador nenhum no futebol.
     (r"gol\s+ou\s+assist(ê|è|e)ncia", "artilheiro (prop de jogador)"),
@@ -47,7 +67,11 @@ SEM_COBERTURA: tuple[tuple[str, str], ...] = (
     # gol. Diferente de artilheiro (que é sobre jogador); a Pinnacle publica
     # "<Time> To Score?" (marca em algum momento) mas não "primeiro a
     # marcar" — checado ao vivo em 2026-08-05, não existe esse special.
-    (r"primeiro\s+a\s+marcar", "primeiro a marcar (sem equivalente na Pinnacle)"),
+    # "Primeiro gol: Náutico" / "1º tempo - primeiro gol: Racing Club"
+    # (EstrelaBet) e "Ultimo a marcar: Botafogo-SP" — mesmas duas famílias
+    # ("primeiro a marcar" e sequência de gols), grafias que faltavam.
+    (r"primeiro\s+a\s+marcar|primeiro\s+gol\s*:",
+     "primeiro a marcar (sem equivalente na Pinnacle)"),
     # A ordem das palavras varia por casa: "duplas faltas" (Betano) e "faltas
     # duplas"/"total faltas duplas" (Novibet) são o mesmo mercado.
     (r"duplas?\s+faltas?|faltas?\s+duplas?", "duplas faltas"),
@@ -58,7 +82,17 @@ SEM_COBERTURA: tuple[tuple[str, str], ...] = (
     # Score?"/"Goals" pro jogo inteiro e pro 1º tempo separadamente, não uma
     # combinação pronta dos dois. Calcular isso exigiria modelo de correlação
     # (mesma categoria de risco do `modelo_gols.py`), não é parsing de texto.
-    (r"marcar\s+em\s+ambos\s+os\s+tempos|ganhar\s+um\s+dos\s+tempos",
+    # A EstrelaBet escreve a mesma família com "vencer" e sem o "os":
+    # "<Time> para vencer ambos tempos", "<Time> para vencer um dos tempos",
+    # "Equipe Ganhar ambos os Tempos: <Time>". Eram ~20 pernas caindo em
+    # "mercado não reconhecido" — mesmo mercado, mesma recusa.
+    (r"marcar\s+em\s+ambos\s+os\s+tempos|ganhar\s+um\s+dos\s+tempos"
+     r"|(vencer|ganhar)\s+(ambos|um)\s+(os\s+|dos\s+)?tempos"
+     r"|marcar\s+em\s+ambos\s+tempos",
+     "probabilidade conjunta entre tempos (sem equivalente na Pinnacle)"),
+    # "Sport para vencer de zero: Sim" — vencer sem sofrer gol. Conjunta de
+    # 1X2 com "não sofre gol", que a Pinnacle não publica pronta.
+    (r"vencer\s+de\s+zero",
      "probabilidade conjunta entre tempos (sem equivalente na Pinnacle)"),
     # Tênis: só o que realmente não existe na Pinnacle.
     (r"tie\s*breaks?", "tie-break"),
@@ -66,7 +100,31 @@ SEM_COBERTURA: tuple[tuple[str, str], ...] = (
     (r"resultado\s+no\s+set", "placar exato de set"),
     # Basquete: cestinha do jogo não é publicado.
     (r"maior\s+n(ú|u)mero\s+de\s+pontos", "cestinha do jogo"),
-    (r"pr(ó|o)ximo\s+gol|(ú|u)ltima\s+equipe", "sequência de gols"),
+    (r"pr(ó|o)ximo\s+gol|(ú|u)ltima\s+equipe|(ú|u)ltimo\s+a\s+marcar",
+     "sequência de gols"),
+    # MMA (Novibet/UFC). A Pinnacle publica MMA, mas `PinnacleScraper.
+    # jogos_normalizados` só carrega basketball/soccer/tennis — nenhum destes
+    # jogos existe do nosso lado pra comparar. Abrir MMA é decisão separada;
+    # até lá, recusa explícita em vez de "mercado não reconhecido".
+    (r"m(é|e)todo\s+de\s+vit(ó|o)ria|rodada\s+em\s+que\s+a\s+luta"
+     r"|total\s+de\s+rodadas|a\s+luta\s+vai\s+at(é|e)\s+o\s+fim",
+     "MMA (esporte não carregado da Pinnacle)"),
+    # Intervalo/final com placar exato junto ("Intervalo/final do jogo
+    # resultado exato: 0:0 1:0", "Intervalo/Tempo Regulamentar e Total 1.5",
+    # "Placar exato: Intervalo / Final: 1:1 4+"). É o `ht_ft` combinado com
+    # placar/total num rótulo só — conjunta que só sairia de modelo.
+    (r"(intervalo|placar\s+exato).*(resultado\s+exato|placar\s+exato"
+     r"|e\s+total\s+\d)|intervalo\s*/\s*tempo\s+regulamentar",
+     "intervalo/final combinado com placar (só com modelo)"),
+    # "Resultado Correto a qualquer momento: 1 - 2" — o placar acontecer EM
+    # ALGUM MOMENTO do jogo, não no fim. Não é `correct_score`; casar com ele
+    # seria mercado restrito x referência ampla ao contrário (o evento "em
+    # algum momento" é bem mais provável que o placar final).
+    (r"resultado\s+correto\s+a\s+qualquer\s+momento",
+     "placar em algum momento (não é o placar final)"),
+    # "Yulia Putintseva ganhar exatamente 1 Set: Sim" — número exato de sets
+    # de um lado. A Pinnacle publica `sets_h2h`/handicap de sets, não o exato.
+    (r"ganhar\s+exatamente\s+\d+\s+set", "sets exatos de um jogador"),
 
     # --- bet-builder da Altenar: a perna perdeu o nome do mercado ------------
     # No `GetEventDetails` o `marketId` das pernas de bet-builder não vem no
@@ -123,6 +181,12 @@ _FAMILIA_POR_MOTIVO: dict[str, str] = {
     "duplas faltas": "duplas_faltas",
     "aces": "aces",
     "tie-break": "tie_break",
+    # Famílias novas: verificadas no pool antes de entrar aqui. Defesas do
+    # goleiro sai em 9 casas ("Total de Defesas do Goleiro (<Jogador>)");
+    # impedimentos hoje só em 3-4 e por enquanto não chega ao mínimo de prop,
+    # mas a chave já fica pronta.
+    "defesas do goleiro": "defesas_goleiro",
+    "impedimentos": "impedimentos",
 }
 
 
@@ -562,6 +626,32 @@ def _parse_tenis(texto: str) -> Leg | None:
         return Leg(texto=texto, market_key=f"games_s{ORDINAIS_SET[m.group(1).lower()]}:{valor}",
                    selecao=lado, suportado=True)
 
+    # "1° Set - Total de Games: Mais de 9,5" (EstrelaBet) — terceira grafia do
+    # MESMO mercado das duas de cima: set por NÚMERO com ordinal ("1°", "2º")
+    # e "games" em vez de "jogos". A Pinnacle publica (`games_s1`), então era
+    # perna morrendo de graça.
+    m = re.search(r"(\d)\s*[.°ºo]?\s*set\s*[-–:]\s*total\s+(?:de\s+)?(?:games|jogos)",
+                  texto, re.I)
+    if m:
+        linha = _linha(texto)
+        if not linha:
+            return Leg(texto=texto, motivo="games do set sem linha reconhecível")
+        lado, valor = linha
+        return Leg(texto=texto, market_key=f"games_s{m.group(1)}:{valor}",
+                   selecao=lado, suportado=True)
+
+    # "Total de Sets: Mais de 2,5" — total de sets da partida. A Pinnacle
+    # publica como `sets_total`, que o parser já usa como GUARDA de bo3
+    # (`exige_mercado="sets_total:2.5"`) mas nunca como mercado próprio.
+    m = re.search(r"total\s+de\s+sets\s*:?\s*(mais|menos|over|under)", texto, re.I)
+    if m:
+        linha = _linha(texto)
+        if not linha:
+            return Leg(texto=texto, motivo="total de sets sem linha reconhecível")
+        lado, valor = linha
+        return Leg(texto=texto, market_key=f"sets_total:{valor}",
+                   selecao=lado, suportado=True)
+
     # "Games Mais de 22.5" / "Total de Games Mais de 23.5" (Betano) / "Total
     # de Games : Mais de 20,5" (Novibet, com ":" entre "Games" e "Mais de") ->
     # partida inteira.
@@ -755,6 +845,21 @@ def _parse_total_gols(texto: str) -> Leg | None:
     # (`SEGUNDO_TEMPO`) — só "" (jogo inteiro) e "_1t" chegam até aqui.
     m = re.match(r"^\s*gols?\s+(.+?)\s*(?:\([^)]*\))?\s*:\s*(mais|menos)\s+de\s+([\d.,]+)\s*$",
                  texto, re.I)
+    if m and not _NAO_E_TIME.match(m.group(1).strip()):
+        lado = "over" if m.group(2).lower() == "mais" else "under"
+        valor = float(m.group(3).replace(",", "."))
+        return Leg(texto=texto, market_key=f"team_total{_sufixo(texto)}:{{lado}}:{valor}",
+                   selecao=lado, time_nome=m.group(1).strip(), suportado=True)
+
+    # "Náutico Mais de 1.5 Gols" / "Sport Mais de 0.5 Gols no 1º Tempo"
+    # (EstrelaBet) — total de equipe SEM a palavra "total": o time vem na
+    # frente e "Gols" fica depois da linha. Mesma correção de classe do
+    # +141% do Mirassol: sem isto o rótulo não casava com nada.
+    #
+    # A âncora à esquerda (`^`) e o `_NAO_E_TIME` são o que impede
+    # "Mais de 2.5 Gols Em Todas as Partidas" (combo multi-jogo da EstrelaBet,
+    # sem time nenhum) de virar total de equipe com nome vazio.
+    m = re.match(r"^(.+?)\s+(mais|menos)\s+de\s+([\d.,]+)\s+gols?\b", texto, re.I)
     if m and not _NAO_E_TIME.match(m.group(1).strip()):
         lado = "over" if m.group(2).lower() == "mais" else "under"
         valor = float(m.group(3).replace(",", "."))
@@ -1042,6 +1147,50 @@ _HANDICAP_TIME = re.compile(
     re.IGNORECASE)
 
 
+# "Empate devolve aposta: Norwich" / "1º tempo - empate devolve aposta:
+# Dallas Wings (F)" / "Primeiro quarto - empate devolve aposta: 2" — grafia
+# EstrelaBet do Draw No Bet. 1.296 linhas em 11 casas no pool, e a Pinnacle
+# PUBLICA o mercado: `"Draw No Bet": "dnb"` / `"Draw No Bet 1st Half":
+# "dnb_1t"` já estão em `value/config.SPECIAL_KEYS`, e "dnb" já está em
+# `fair_odds._PREFIXOS_LADO_SEM_SUFIXO`. Só faltava o rótulo chegar até lá.
+_DNB = re.compile(r"empate\s+devolve\s+(a\s+)?aposta\s*:\s*(?P<alvo>.+)$",
+                  re.IGNORECASE)
+
+# "Primeiro quarto - ..." / "Segundo quarto - ...": a Pinnacle só publica
+# período 0 e 1 (ver a guarda de 2º tempo em `_parse_leg_pinnacle`), então
+# quarto NÃO tem equivalente — e `_sufixo()` devolveria "" pra ele, casando
+# contra o mercado do JOGO INTEIRO. Mesma armadilha do 2º tempo, outra
+# granularidade.
+_QUARTO = re.compile(r"\b(primeiro|segundo|terceiro|quarto|\d[.°ºo]?)\s+quarto\b",
+                     re.IGNORECASE)
+
+
+def _parse_dnb(texto: str) -> Leg | None:
+    """Draw No Bet — empate devolve a aposta.
+
+    Dois lados só (mandante/visitante), indexados por lado como o `h2h`; por
+    isso `dnb` está em `_PREFIXOS_LADO_SEM_SUFIXO` e `time_nome` aqui escolhe
+    o lado em vez de pedir sufixo `:home`/`:away`.
+    """
+    m = _DNB.search(texto)
+    if m is None:
+        return None
+    if _QUARTO.search(texto):
+        return Leg(texto=texto, motivo="quarto (sem mercado equivalente na Pinnacle)")
+
+    alvo = m.group("alvo").strip()
+    if not alvo:
+        return Leg(texto=texto, motivo="empate devolve aposta sem lado reconhecível")
+    sufixo = _sufixo(texto)
+    if alvo in ("1", "2"):
+        return Leg(texto=texto, market_key=f"dnb{sufixo}",
+                   selecao="home" if alvo == "1" else "away", suportado=True)
+    # Não existe seleção "empate" num mercado que devolve a aposta no empate.
+    if re.fullmatch(r"empate|draw|x", alvo, re.I):
+        return Leg(texto=texto, motivo="empate devolve aposta sem lado reconhecível")
+    return Leg(texto=texto, market_key=f"dnb{sufixo}", time_nome=alvo, suportado=True)
+
+
 def _parse_handicap_futebol(texto: str) -> Leg | None:
     """Handicap asiático de time (futebol ou basquete).
 
@@ -1251,7 +1400,7 @@ def _parse_leg_pinnacle(texto: str) -> Leg:
     if COMBINADOS.search(texto):
         return Leg(texto=texto, motivo="mercado combinado num rótulo só")
 
-    for parser in (_parse_handicap_futebol,
+    for parser in (_parse_dnb, _parse_handicap_futebol,
                    _parse_resultado, _parse_escanteios, _parse_total_gols, _parse_btts):
         leg = parser(texto)
         if leg is not None:

@@ -133,6 +133,7 @@ _PROP_PALAVRAS = re.compile(
     r"|chutes?\s+(no|a|ao)\s+gol"
     r"|marcar\s+(em\s+qualquer\s+momento|a\s+qualquer)"
     r"|artilheiro|marcador"
+    r"|defesas?\s+d[oe]\s+goleiro|impedimentos?"
     r"|\bhandicap\b",
     re.IGNORECASE)
 
@@ -141,13 +142,19 @@ def _eh_mercado_prop(market_nome: str) -> bool:
     return bool(_PROP_PALAVRAS.search(market_nome))
 
 
-# Mesmas quatro famílias que `_PROP_PALAVRAS` cobre por regex, só que pelo
-# campo estruturado — usado quando o casamento veio por `ChaveConsenso`
-# (fallback canônico) em vez de igualdade de string do `market_nome`. Não
-# inclui `tie_break`/`duplas_faltas`/`aces` de propósito: o regex antigo
-# também não casava essas palavras, então o mínimo genérico é o comportamento
+# Mesmas famílias que `_PROP_PALAVRAS` cobre por regex, só que pelo campo
+# estruturado — usado quando o casamento veio por `ChaveConsenso` (fallback
+# canônico) em vez de igualdade de string do `market_nome`. Não inclui
+# `tie_break`/`duplas_faltas`/`aces` de propósito: o regex antigo também não
+# casava essas palavras, então o mínimo genérico é o comportamento
 # equivalente, não uma mudança de critério.
-_FAMILIAS_PROP = frozenset({"cartoes", "chutes_gol", "artilheiro"})
+#
+# `defesas_goleiro`/`impedimentos` entram desde o primeiro dia: são prop sem
+# Pinnacle nenhuma por trás, a classe mais fraca da tabela de confiança da
+# skill `value-bet-methodology`. Nascer no mínimo genérico e ser apertado
+# depois seria fazer o caminho na ordem errada.
+_FAMILIAS_PROP = frozenset({"cartoes", "chutes_gol", "artilheiro",
+                            "defesas_goleiro", "impedimentos"})
 
 
 def _normalizar(texto: str) -> str:
