@@ -493,6 +493,14 @@ class ProvedorConsenso:
         self.evento = evento
         self.inicio_evento = inicio_evento
         self._cache: list[dict] | None = None
+        # Diagnóstico do ciclo, não estado de negócio: quantas pernas pediram
+        # consenso e quantas conseguiram. É o que permite ao `pipeline`
+        # separar "o evento nem está no pool" de "está, mas não formou" — sem
+        # isso o log só sabe dizer "N sem cobertura", que foi o balde único
+        # que escondeu este funil inteiro por semanas.
+        self.tentativas = 0
+        self.sucessos = 0
+        self.sem_chave = 0
 
     def _linhas(self) -> list[dict]:
         if self._cache is not None:
@@ -547,6 +555,7 @@ class ProvedorConsenso:
         rótulo da oferta). Perna sem chave reconhecida (motivo fora de
         `_FAMILIA_POR_MOTIVO`) morre aqui, sem adivinhar.
         """
+        self.tentativas += 1
         linhas = self._linhas()
         if not linhas:
             return None
@@ -558,8 +567,30 @@ class ProvedorConsenso:
             # casamento canônico — 175 pernas medidas no banco falhavam o
             # literal e paravam ali, com o fallback virando código morto.
             market_nome, _, selecao = texto_perna.partition(":")
-            return calcular(linhas, market_nome.strip(), selecao.strip(),
-                            excluir_casa=self.casa, chave_alvo=chave)
-        if chave is None:
+            achado = calcular(linhas, market_nome.strip(), selecao.strip(),
+                              excluir_casa=self.casa, chave_alvo=chave)
+        elif chave is None:
+            self.sem_chave += 1
             return None
-        return calcular(linhas, "", "", excluir_casa=self.casa, chave_alvo=chave)
+        else:
+            achado = calcular(linhas, "", "", excluir_casa=self.casa,
+                              chave_alvo=chave)
+        if achado is not None:
+            self.sucessos += 1
+        return achado
+
+    def diagnostico(self) -> str | None:
+        """Por que este consenso não resolveu — pra quem for LOGAR o funil.
+
+        Devolve None quando nem foi consultado ou quando resolveu tudo. As
+        três causas são mutuamente excludentes na ordem em que aparecem:
+        sem pool não dá nem pra tentar; sem chave a perna morre antes do
+        casamento; o resto é pool que existe e mesmo assim não formou.
+        """
+        if self.tentativas == 0 or self.sucessos == self.tentativas:
+            return None
+        if not self._linhas():
+            return "evento fora do pool"
+        if self.sem_chave:
+            return "perna sem chave de consenso"
+        return "consenso não formou"

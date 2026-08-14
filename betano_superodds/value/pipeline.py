@@ -11,7 +11,7 @@ import os
 from collections import Counter
 from typing import Any, Iterable
 
-from . import config, stake
+from . import config, curadoria, stake
 from .consenso import ProvedorConsenso
 from .fair_odds import calcular_odd_justa
 from .market_parser import parse_mercado, tipo_mercado
@@ -93,6 +93,7 @@ def avaliar_oferta(oferta: dict, matchups: list[Matchup],
         saida["fonte_odd"] = "pinnacle"
         saida["status"] = "sem_odd_justa"
         saida["motivo"] = f"sem cobertura: {motivos}"
+        saida["motivo_classe"] = "sem consenso disponível"
         return saida
 
     # `inicio_evento` na frente: a janela de ±18h do matcher compara com o
@@ -160,6 +161,17 @@ def avaliar_oferta(oferta: dict, matchups: list[Matchup],
     if not fair.ok:
         saida["status"] = "sem_odd_justa"
         saida["motivo"] = fair.motivo_falha
+        # `motivo` já diz QUAL perna morreu; `motivo_classe` diz ONDE, que é o
+        # que se agrega no log do ciclo. Perna que a Pinnacle deveria cobrir e
+        # não cobriu é um problema diferente de perna exótica sem consenso, e
+        # o balde único "N sem cobertura" tratava as duas como a mesma coisa.
+        motivo = fair.motivo_falha or ""
+        if motivo.startswith("sem odd na Pinnacle"):
+            saida["motivo_classe"] = "sem mercado na Pinnacle"
+        else:
+            saida["motivo_classe"] = (
+                (consenso.diagnostico() if consenso is not None else None)
+                or "sem consenso disponível")
         return saida
 
     # 4. edge — o threshold depende de a justa ser preço observado ou
@@ -266,6 +278,39 @@ def avaliar_oferta(oferta: dict, matchups: list[Matchup],
                     saida["confianca_original"] = saida["confianca"]
                     saida["confianca"] = nova
 
+    # 7. curadoria estruturada (`curadoria.py`) — roda ALÉM do rebaixamento
+    # legado acima, não em vez dele, enquanto os dois convivem (ver
+    # CURADORIA_ATIVA/CURADORIA_ENFORCE em value/config.py). Usa
+    # `value.confianca` (o tier ORIGINAL, antes do bloco 6 acima) como entrada
+    # de propósito — assim os dois blocos nunca compõem um sobre o outro
+    # nem competem por quem escreve `saida["confianca"]` por último; se os
+    # dois estiverem em enforce ao mesmo tempo (não é o uso pretendido, mas
+    # o código não impede), este bloco roda por último e prevalece.
+    if config.CURADORIA_ATIVA and value.confianca in curadoria.ELEGIVEL:
+        try:
+            veredito = curadoria.avaliar(
+                oferta, [l.texto for l in legs], value.confianca,
+                eventos_por_perna=[l.evento_texto for l in legs])
+        except Exception as exc:  # a curadoria nunca derruba a avaliação
+            log.warning("curadoria: avaliar falhou pra %s: %s",
+                       oferta.get("evento"), exc)
+            veredito = None
+        if veredito is not None:
+            saida["veredito_curadoria"] = veredito
+            if config.CURADORIA_ENFORCE:
+                if veredito.decisao == "vetado":
+                    log.info("curadoria: VETO (%s) — %s — %s — edge %+.1f%%",
+                             veredito.motivo, oferta.get("evento"),
+                             oferta.get("mercado"), value.edge_pct)
+                    saida["is_value"] = False
+                    saida["status_curadoria"] = "vetado"
+                elif veredito.decisao == "degrau":
+                    log.info("curadoria: confiança rebaixada de %s pra %s "
+                             "(%s) — %s — %s", veredito.confianca_original,
+                             veredito.confianca_final, veredito.motivo,
+                             oferta.get("evento"), oferta.get("mercado"))
+                    saida["confianca"] = veredito.confianca_final
+
     return saida
 
 
@@ -298,6 +343,18 @@ def avaliar_ofertas(ofertas: Iterable[dict], storage=None) -> list[dict]:
     if statuses.get("sem_odd_justa"):
         partes.append(f"{statuses['sem_odd_justa']} sem cobertura")
     log.info("resultado: %s", ", ".join(partes) if partes else "nenhum")
+
+    # Quebra do balde "sem cobertura" por ONDE morreu. Sem isto o log dava um
+    # número só, e as quatro causas (evento fora do pool, perna sem chave,
+    # consenso não formou, mercado ausente na Pinnacle) pedem consertos
+    # completamente diferentes — a de longe maior é a primeira, e é a única
+    # que não se conserta mexendo em código de casamento.
+    classes = Counter(r.get("motivo_classe") for r in resultados
+                      if r.get("status") == "sem_odd_justa")
+    if classes:
+        log.info("sem cobertura por causa: %s",
+                 ", ".join(f"{n} {classe or '?'}"
+                           for classe, n in classes.most_common()))
 
     if edges:
         log.info("edges: min %+.1f%% / max %+.1f%% / %d value(s)",

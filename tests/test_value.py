@@ -1016,6 +1016,43 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(r["status"], "sem_odd_justa")
         self.assertIsNone(r["odd_justa"])
 
+    def test_motivo_classe_separa_pinnacle_de_consenso(self):
+        """O balde único "N sem cobertura" tratava causas que pedem consertos
+        opostos como a mesma coisa. Perna exótica sem consenso disponível é um
+        problema; perna que a Pinnacle DEVERIA cobrir e não cobriu é outro."""
+        exotica = avaliar_oferta(self._oferta(mercado="Total de Cartões Mais de 5.5"),
+                                 [matchup_exemplo()])
+        self.assertEqual(exotica["motivo_classe"], "sem consenso disponível")
+
+        # Mercado que o parser suporta, mas cuja LINHA este matchup não
+        # publica (ele só tem escanteios 9.5).
+        ausente = avaliar_oferta(
+            self._oferta(mercado="Total de Escanteios Mais de 14.5"),
+            [matchup_exemplo()])
+        self.assertEqual(ausente["status"], "sem_odd_justa")
+        self.assertEqual(ausente["motivo_classe"], "sem mercado na Pinnacle")
+
+    def test_diagnostico_do_consenso_distingue_pool_de_casamento(self):
+        """As três causas do lado do consenso são excludentes e cada uma pede
+        um conserto diferente — pool vazio não se resolve mexendo em regex."""
+        vazio = consenso.ProvedorConsenso(StorageFake([]), evento_id="1")
+        vazio.prob_para("Total de Cartões Mais de 4.5")
+        self.assertEqual(vazio.diagnostico(), "evento fora do pool")
+
+        com_pool = consenso.ProvedorConsenso(
+            StorageFake(_linhas_casa("VaiDeBet", 1.9, 1.9)), evento_id="1")
+        com_pool.prob_para("Total de Cartões Mais de 4.5")
+        self.assertEqual(com_pool.diagnostico(), "consenso não formou")
+
+        sem_chave = consenso.ProvedorConsenso(
+            StorageFake(_linhas_casa("VaiDeBet", 1.9, 1.9)), evento_id="1")
+        sem_chave.prob_para("Qualq. Altura")
+        self.assertEqual(sem_chave.diagnostico(), "perna sem chave de consenso")
+
+    def test_diagnostico_e_none_quando_nao_ha_o_que_diagnosticar(self):
+        nunca = consenso.ProvedorConsenso(StorageFake([]), evento_id="1")
+        self.assertIsNone(nunca.diagnostico())
+
     def _jogo_b(self) -> Matchup:
         m = Matchup(id=2, league="X", home_team="Tigres UANL",
                     away_team="Minnesota United FC", commence_time=HOJE)
