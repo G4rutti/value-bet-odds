@@ -692,6 +692,129 @@ class TestSondaProfunda(unittest.TestCase):
         self.assertEqual(pedidos, [1])
 
 
+class TestSondaDirecionadaPelaFila(unittest.TestCase):
+    """Uma fatia do orçamento de detalhes vai pros eventos que a AVALIAÇÃO
+    precisa precificar, não só pra onde há pista de boost.
+
+    Medido no banco vivo: das 509 ofertas ativas com perna sem cobertura, 31%
+    não tinham NENHUMA outra casa no pool pro evento delas e 58% tinham menos
+    que `CONSENSO_MIN_CASAS_PROP`. O pool era subproduto puro da caça a boost —
+    nada olhava a fila.
+    """
+
+    def _listagem(self, eventos: list[tuple[int, str, float | None]],
+                  turbinados: list[int] | None = None) -> dict:
+        """`eventos` são triplas (id, nome, horas até o kickoff)."""
+        turbinados = turbinados or []
+        return {
+            "events": [
+                {"id": ev_id, "name": nome, "champId": 7,
+                 "competitorIds": [1, 2],
+                 "marketIds": [9000 + ev_id] if ev_id in turbinados else [],
+                 **({} if horas is None else {"startDate": daqui(horas)})}
+                for ev_id, nome, horas in eventos
+            ],
+            "markets": [{"id": 9000 + i, "name": "1x2 - Odds Aumentadas"}
+                        for i in turbinados],
+            "odds": [], "competitors": [], "champs": [],
+        }
+
+    def _sondados(self, listagem: dict, alvos: list[dict],
+                  teto: int = 12, vagas: int = 4) -> list[int]:
+        sc = ScraperFake(listagem, {})
+        sc.alvos = alvos
+        pedidos: list[int] = []
+
+        async def espiao(ev_id, ligas):
+            pedidos.append(ev_id)
+            return []
+
+        sc._do_detalhe = espiao  # type: ignore[method-assign]
+        antigos = (config.ALTENAR_MAX_DETALHES, config.ALTENAR_DETALHES_FILA)
+        config.ALTENAR_MAX_DETALHES = teto
+        config.ALTENAR_DETALHES_FILA = vagas
+        try:
+            asyncio.run(sc._scrape_esporte(66))
+        finally:
+            (config.ALTENAR_MAX_DETALHES,
+             config.ALTENAR_DETALHES_FILA) = antigos
+        return pedidos
+
+    def test_evento_da_fila_entra_na_frente_da_janela(self):
+        """Com teto de 2, sem a fatia o evento 30 (fim da listagem) nunca
+        seria sondado."""
+        listagem = self._listagem([(10, "A vs. B", 1), (20, "C vs. D", 2),
+                                   (30, "Norwich vs. West Bromwich", 3)])
+        pedidos = self._sondados(
+            listagem,
+            [{"evento": "Norwich - West Bromwich", "inicio_evento": daqui(3)}],
+            teto=2, vagas=1)
+        self.assertIn(30, pedidos)
+
+    def test_boost_na_listagem_continua_vindo_primeiro(self):
+        """Cobertura de consenso só vale pra oferta que existe — quem já mostra
+        mercado turbinado é pista concreta e não pode perder a vez."""
+        listagem = self._listagem(
+            [(10, "A vs. B", 5), (30, "Norwich vs. West Bromwich", 3)],
+            turbinados=[10])
+        pedidos = self._sondados(
+            listagem,
+            [{"evento": "Norwich - West Bromwich", "inicio_evento": daqui(3)}],
+            teto=2, vagas=1)
+        self.assertEqual(pedidos[0], 10)
+
+    def test_a_fatia_sai_de_dentro_do_orcamento(self):
+        """O custo por ciclo não pode subir: o teto continua sendo o teto."""
+        listagem = self._listagem([(i, f"A{i} vs. B{i}", 2) for i in range(10, 20)])
+        alvos = [{"evento": f"A{i} - B{i}", "inicio_evento": daqui(2)}
+                 for i in range(10, 20)]
+        self.assertEqual(len(self._sondados(listagem, alvos, teto=3, vagas=2)), 3)
+
+    def test_evento_da_fila_nao_paga_detalhe_duas_vezes(self):
+        """Um evento pode estar em `com_boost` E na fila; sem dedup ele
+        consumiria duas vagas do mesmo orçamento."""
+        listagem = self._listagem([(10, "Norwich vs. West Bromwich", 2),
+                                   (20, "C vs. D", 3)], turbinados=[10])
+        pedidos = self._sondados(
+            listagem,
+            [{"evento": "Norwich - West Bromwich", "inicio_evento": daqui(2)}],
+            teto=4, vagas=2)
+        self.assertEqual(len(pedidos), len(set(pedidos)))
+        self.assertIn(20, pedidos)
+
+    def test_alvo_que_nao_casa_nao_gasta_vaga(self):
+        listagem = self._listagem([(10, "A vs. B", 2)])
+        pedidos = self._sondados(
+            listagem,
+            [{"evento": "Jogo Que Nao Existe - Outro", "inicio_evento": daqui(2)}],
+            teto=4, vagas=2)
+        self.assertEqual(pedidos, [10])
+
+    def test_guardas_do_matcher_valem_aqui_tambem(self):
+        """Casar errado aqui não gera edge falso, mas gasta o request no jogo
+        errado — que é exatamente o problema que a fatia existe pra resolver.
+        Sem o veto de UF de `matcher.uf_conflita`, isto casaria."""
+        sc = ScraperFake(self._listagem([(10, "Botafogo-SP vs. Ferroviaria", 2)]), {})
+        sc.alvos = [{"evento": "Botafogo-RJ - Ferroviaria",
+                     "inicio_evento": daqui(2)}]
+        eventos = {e["id"]: e for e in sc._listagem["events"]}
+        self.assertEqual(sc._eventos_da_fila(eventos), [])
+
+    def test_alvo_alem_do_horizonte_nao_gasta_vaga(self):
+        """A tolerância do matcher mede a CONCORDÂNCIA entre as duas datas, não
+        a distância até agora: alvo e listagem concordam num jogo de daqui a
+        três dias. Quem corta por distância é `_por_kickoff`."""
+        alem = config.ALTENAR_HORIZONTE_HORAS + 5
+        sc = ScraperFake(self._listagem([(10, "A vs. B", alem)]), {})
+        sc.alvos = [{"evento": "A - B", "inicio_evento": daqui(alem)}]
+        eventos = {e["id"]: e for e in sc._listagem["events"]}
+        self.assertEqual(sc._eventos_da_fila(eventos), [])
+
+    def test_sem_alvos_o_comportamento_e_o_de_antes(self):
+        listagem = self._listagem([(10, "A vs. B", 1), (20, "C vs. D", 2)])
+        self.assertEqual(self._sondados(listagem, [], teto=12), [10, 20])
+
+
 class TestCursorDeOffset(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()

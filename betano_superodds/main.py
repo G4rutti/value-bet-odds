@@ -23,6 +23,7 @@ from .revalidacao import revalidar_oferta
 from .scraper import BetanoScraper, ScraperError
 from .storage import Storage
 from .value import config as vconfig
+from .value.market_parser import parse_mercado
 
 log = logging.getLogger("betano")
 
@@ -132,9 +133,42 @@ def avancar_offset(storage: Storage, casa: config.CasaAltenar) -> int:
     return atual % janela
 
 
+def alvos_da_fila(storage: Storage) -> list[dict]:
+    """`{"evento", "inicio_evento"}` do que a avaliação precisa precificar.
+
+    A fila (`Storage.pendentes_de_avaliacao`, o MESMO SELECT que o alertador
+    usa depois no ciclo) filtrada pelas ofertas com pelo menos uma perna sem
+    cobertura Pinnacle — são as únicas que dependem do consenso, e portanto
+    as únicas em que sondar a casa muda alguma coisa.
+
+    Reduzido a evento distinto: uma oferta por perna sondaria o mesmo jogo
+    várias vezes. A ordem da fila já vem por kickoff mais próximo, e
+    `dict.fromkeys` preserva isso.
+    """
+    try:
+        fila = storage.pendentes_de_avaliacao(config.MAX_AVALIACOES_POR_CICLO,
+                                              config.REAVALIAR_APOS_MINUTOS)
+    except Exception as exc:  # noqa: BLE001 — sonda direcionada é otimização
+        log.warning("não deu pra ler a fila pra sonda direcionada: %s", exc)
+        return []
+
+    vistos: dict[tuple[str, str], dict] = {}
+    for oferta in fila:
+        evento, inicio = oferta.get("evento"), oferta.get("inicio_evento")
+        if not evento or not inicio:
+            continue
+        legs = parse_mercado(oferta.get("mercado") or "")
+        if not any(not leg.suportado for leg in legs):
+            continue
+        vistos.setdefault((evento, inicio),
+                          {"evento": evento, "inicio_evento": inicio})
+    return list(vistos.values())
+
+
 async def coletar(
     scraper: BetanoScraper, casas: list[config.CasaAltenar],
     offsets: dict[str, int] | None = None,
+    alvos: list[dict] | None = None,
 ) -> tuple[list, set[str], set[tuple[str, str]], list]:
     """Ofertas do ciclo + o que ele de fato olhou.
 
@@ -203,7 +237,7 @@ async def coletar(
         tc = time.monotonic()
         try:
             async with EsportivaScraper(
-                casa, offset=(offsets or {}).get(casa.slug, 0)
+                casa, offset=(offsets or {}).get(casa.slug, 0), alvos=alvos
             ) as sc:
                 casa_offers = await sc.scrape()
                 escopo |= {(casa.nome, ev) for ev in sc.eventos_sondados}
@@ -231,8 +265,19 @@ async def run_cycle(scraper: BetanoScraper, storage: Storage,
     if casas:
         log.info("casas Altenar neste ciclo: %s",
                  ", ".join(f"{c.nome}@{offsets[c.slug]}" for c in casas))
+
+    # Lido ANTES da coleta: é a fila que o alertador vai avaliar no fim deste
+    # mesmo ciclo, e os mercados sondados agora já entram no pool a tempo de
+    # servir de referência pra ela (`salvar_mercados_casa` roda logo abaixo,
+    # antes da avaliação, pelo mesmo motivo).
+    alvos = alvos_da_fila(storage) if casas else []
+    if alvos:
+        log.info("sonda direcionada: %d evento(s) da fila com perna sem "
+                 "cobertura, %d vaga(s) por casa", len(alvos),
+                 config.ALTENAR_DETALHES_FILA)
     try:
-        offers, raspadas, escopo, mercados = await coletar(scraper, casas, offsets)
+        offers, raspadas, escopo, mercados = await coletar(scraper, casas, offsets,
+                                                           alvos=alvos)
     except ScraperError as exc:
         log.error("captura falhou: %s", exc)
         storage.record_run(ofertas=0, erro=str(exc))

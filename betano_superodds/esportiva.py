@@ -68,6 +68,13 @@ from curl_cffi.requests.exceptions import RequestException
 from . import config
 from .models import MercadoCasa, Offer, millis_to_iso, minutos_ate_inicio, to_utc_iso
 from .scraper import ScraperError
+# A sonda direcionada casa evento da listagem contra a fila de avaliação por
+# nome+data. Reusa o mesmo casador (e as mesmas guardas de UF/gênero) da ponte
+# fuzzy do consenso, com a janela de kickoff do consenso — não a de ±18h do
+# caminho Pinnacle. Ver `_eventos_da_fila`.
+from .value import config as vconfig
+from .value.matcher import _parse_data, encontrar_evento, split_times
+from .value.models import Matchup
 
 log = logging.getLogger(__name__)
 
@@ -111,11 +118,18 @@ class EsportivaScraper:
 
     def __init__(self, casa: config.CasaAltenar | None = None,
                  session: "curl_requests.AsyncSession | None" = None,
-                 offset: int = 0) -> None:
+                 offset: int = 0,
+                 alvos: list[dict] | None = None) -> None:
         self.casa = casa or CASA_PADRAO
         # De onde começar a sondar a listagem nesta visita. Quem administra o
         # avanço é o `main`, que persiste um cursor por casa.
         self.offset = max(0, int(offset))
+        # Eventos que a AVALIAÇÃO precisa precificar e não têm referência no
+        # pool — `{"evento": nome, "inicio_evento": iso}`, montados pelo
+        # `main` a partir da fila. Injetados pelo mesmo caminho do `offset`
+        # em vez de lidos daqui: o scraper não conhece `Storage`, e não é
+        # ele quem decide o que é urgente.
+        self.alvos = list(alvos or [])
         # Eventos cujo DETALHE foi pedido nesta visita. O diff precisa disso:
         # combo que não foi sondado não pode ser tratado como expirado.
         self.eventos_sondados: set[str] = set()
@@ -224,10 +238,21 @@ class EsportivaScraper:
             ini = self.offset % len(janela)
             janela = janela[ini:] + janela[:ini]
 
+        # Fatia reservada pra fila de avaliação. Sai de DENTRO do orçamento
+        # (o `[:ALTENAR_MAX_DETALHES]` lá embaixo continua valendo pro total),
+        # e vem na frente do `janela` mas atrás do `com_boost`: quem já mostra
+        # mercado turbinado é pista concreta de oferta, e oferta é o produto —
+        # cobertura de consenso só vale pra oferta que existe.
+        da_fila = self._eventos_da_fila(eventos)[: config.ALTENAR_DETALHES_FILA]
+
         n_detalhes_pedidos = 0
         n_boosts_achados = 0
 
-        for ev_id in (com_boost + janela)[: config.ALTENAR_MAX_DETALHES]:
+        # `dict.fromkeys` dedupa preservando a ordem: um evento pode estar em
+        # `com_boost` E na fila, e pagar dois detalhes por ele desperdiçaria
+        # justamente o orçamento que esta mudança existe pra economizar.
+        ordem = list(dict.fromkeys(com_boost + da_fila + janela))
+        for ev_id in ordem[: config.ALTENAR_MAX_DETALHES]:
             try:
                 detail_offers = await self._do_detalhe(ev_id, ligas)
                 ofertas += detail_offers
@@ -240,12 +265,61 @@ class EsportivaScraper:
                 continue
             self.eventos_sondados.add(str(ev_id))
 
-        if n_mercados_turb or n_boosts_achados:
-            log.info("%s/%s: %d mercado(s) turb. na listagem, %d boost(s) em %d detalhe(s)",
+        if n_mercados_turb or n_boosts_achados or da_fila:
+            log.info("%s/%s: %d mercado(s) turb. na listagem, %d boost(s) em "
+                     "%d detalhe(s) (%d pela fila de avaliação)",
                      self.casa.slug, ESPORTES.get(sport_id, sport_id),
-                     n_mercados_turb, n_boosts_achados, n_detalhes_pedidos)
+                     n_mercados_turb, n_boosts_achados, n_detalhes_pedidos,
+                     len(da_fila))
 
         return ofertas
+
+    def _eventos_da_fila(self, eventos: dict[int, dict]) -> list[int]:
+        """Ids da listagem que correspondem aos `alvos` da fila de avaliação.
+
+        Casa por NOME + DATA com `matcher.encontrar_evento`, o mesmo casador
+        (e as mesmas guardas: `split_times`, os dois sentidos de
+        mandante/visitante, veto de UF e de gênero) que a ponte fuzzy do
+        consenso já usa. Nada de fuzzy é reimplementado aqui — casar errado
+        aqui não gera edge falso, mas gasta o request no jogo errado, que é o
+        problema que esta fatia existe pra resolver.
+
+        A tolerância de kickoff é a do consenso (`CONSENSO_MATCH_MAX_HORAS`) e
+        não a de ±18h do caminho Pinnacle — mas ela mede a CONCORDÂNCIA entre
+        as duas datas, não a distância até agora: alvo e listagem podem
+        concordar num jogo de daqui a três dias. Quem corta por distância é o
+        `_por_kickoff` no fim, o mesmo que já governa os outros dois grupos —
+        sondar o jogo de depois de amanhã não ajuda a precificar a oferta de
+        agora, e ainda rouba a vaga de quem ajuda.
+        """
+        if not self.alvos:
+            return []
+
+        candidatos: list[Matchup] = []
+        for ev_id, ev in eventos.items():
+            nome = self._nome_evento(ev, {})
+            times = split_times(nome)
+            # `to_utc_iso` antes do `_parse_data`: a Altenar manda `startDate`
+            # ora como epoch em ms, ora como ISO com "Z" (ver o docstring de
+            # `models.to_utc_iso`), e `_parse_data` só entende string.
+            inicio = _parse_data(to_utc_iso(ev.get("startDate")))
+            if times is None or inicio is None:
+                continue
+            candidatos.append(Matchup(id=ev_id, league=str(ev.get("champId") or ""),
+                                      home_team=times[0], away_team=times[1],
+                                      commence_time=inicio))
+        if not candidatos:
+            return []
+
+        ids: list[int] = []
+        for alvo in self.alvos:
+            achado = encontrar_evento(alvo.get("evento") or "",
+                                      alvo.get("inicio_evento"), candidatos,
+                                      min_score=vconfig.CONSENSO_MATCH_MIN_SCORE,
+                                      max_horas=vconfig.CONSENSO_MATCH_MAX_HORAS)
+            if achado is not None and achado.matchup.id not in ids:
+                ids.append(achado.matchup.id)
+        return self._por_kickoff(ids, eventos)
 
     # ------------------------------------------------------------------
 

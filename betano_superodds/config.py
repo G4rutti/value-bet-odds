@@ -213,6 +213,28 @@ ESPORTIVA_MAX_DETALHES = ALTENAR_MAX_DETALHES   # nome antigo
 # padrão), dentro do TTL de reavaliação de 60 min.
 ALTENAR_JANELA_SONDA = int(os.getenv("ALTENAR_JANELA_SONDA", "48"))
 
+# Quantos dos `ALTENAR_MAX_DETALHES` ficam reservados pros eventos que estão na
+# FILA DE AVALIAÇÃO com perna sem cobertura.
+#
+# Fatiado de DENTRO do orçamento, nunca somado: o custo por ciclo continua
+# `ALTENAR_MAX_DETALHES × CASAS_POR_CICLO`. O que muda é pra onde os 12
+# apontam.
+#
+# Existe porque o pool de consenso era subproduto puro da caça a boost: a sonda
+# escolhia por "tem mercado turbinado" mais uma janela rotativa, e nada olhava
+# o que a avaliação precisava precificar. Medido no banco vivo, das 509 ofertas
+# ativas com perna sem cobertura, 31% não tinham NENHUMA outra casa no pool pro
+# evento delas e 58% tinham menos que `CONSENSO_MIN_CASAS_PROP`. A falta se
+# concentra em Betano e Novibet, as duas casas fora do feed Altenar — jogos de
+# UFC, Championship, Cincinnati WTA e MLS que a rotação simplesmente nunca
+# sondou.
+#
+# 4 de 12 é um terço: deixa a maioria do orçamento na caça a boost (que é o que
+# gera oferta) e ainda assim dobra a chance de o evento avaliado ter
+# referência. Subir isto troca descoberta de oferta por cobertura de consenso —
+# é decisão do dono, com o funil por causa do log na mão (`pipeline.py`).
+ALTENAR_DETALHES_FILA = int(os.getenv("ALTENAR_DETALHES_FILA", "4"))
+
 # Até quantas horas à frente vale gastar request de detalhe.
 #
 # A janela de sondagem é cara (12 detalhes por casa, e a casa só volta a cada
