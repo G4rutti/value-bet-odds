@@ -154,11 +154,35 @@ class Alertador:
         idade = datetime.now(timezone.utc) - quando.astimezone(timezone.utc)
         return idade > timedelta(minutes=limite)
 
+    @staticmethod
+    def _selecionar_diversificado(values: list[dict]) -> list[dict]:
+        """Top edge, mas sem deixar uma família de mercado engolir o ciclo.
+
+        Percorre `values` já ordenado por edge decrescente e vai aceitando
+        até `MAX_ALERTAS_POR_CICLO`, pulando (não descartando pra sempre,
+        só não escolhendo agora) qualquer item cuja família já bateu
+        `MAX_ALERTAS_POR_FAMILIA_POR_CICLO` ENTRE OS JÁ SELECIONADOS. Sem
+        isto, vários handicaps (ou qualquer família só) de edge alto no
+        mesmo ciclo enchiam o teto sozinhos e outra família de edge menor
+        nunca aparecia, mesmo em jogos sem nenhuma correlação entre si.
+        """
+        selecionados: list[dict] = []
+        por_familia: dict[str, int] = {}
+        teto_familia = config.MAX_ALERTAS_POR_FAMILIA_POR_CICLO
+        for resultado in sorted(values, key=lambda r: r["edge_pct"], reverse=True):
+            if len(selecionados) >= config.MAX_ALERTAS_POR_CICLO:
+                break
+            familia = resultado.get("familia_mercado") or "outros"
+            if teto_familia > 0 and por_familia.get(familia, 0) >= teto_familia:
+                continue
+            selecionados.append(resultado)
+            por_familia[familia] = por_familia.get(familia, 0) + 1
+        return selecionados
+
     async def _alertar_values(self, values: list[dict]) -> int:
         """Manda os alertas que sobrarem do funil de filtros. Devolve quantos saíram."""
         enviados = 0
-        for resultado in sorted(values, key=lambda r: r["edge_pct"], reverse=True)[
-                : config.MAX_ALERTAS_POR_CICLO]:
+        for resultado in self._selecionar_diversificado(values):
             offer_id = resultado.get("offer_id")
             content_hash = resultado.get("content_hash")
             if not offer_id or not content_hash:

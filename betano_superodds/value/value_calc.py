@@ -69,6 +69,59 @@ def classe_mercado_da_oferta(legs) -> str:
     return "prop" if any(classe_mercado_da_perna(l) == "prop" for l in legs) else "geral"
 
 
+# Família de mercado, granularidade mais fina que `classe_mercado` — usada só
+# pra diversificar a SELEÇÃO de alertas (`alerts.py`), não pra threshold nem
+# confiança. Baseada em `motivo` (pernas sem cobertura, via consenso — texto
+# livre de `market_parser.SEM_COBERTURA`, então checagem por substring, não
+# igualdade exata, pra não quebrar quando uma grafia nova de motivo aparecer)
+# e em `market_key` (pernas com preço Pinnacle direto).
+def _familia_da_perna(leg) -> str:
+    motivo = (leg.motivo or "").lower()
+    if not leg.suportado:
+        if "cart" in motivo:
+            return "cartoes"
+        if "chute" in motivo:
+            return "chutes_gol" if "gol" in motivo else "chutes_total"
+        if "artilheiro" in motivo:
+            return "artilheiro"
+        if "defesa" in motivo:
+            return "defesas_goleiro"
+        if "impediment" in motivo:
+            return "impedimentos"
+        return "outros_prop"
+
+    chave = leg.market_key or ""
+    if chave.startswith("corners"):
+        return "escanteios"
+    if "spread" in chave:
+        return "handicap"
+    if chave.startswith(("totals", "team_total", "exact_goals")):
+        return "totais_gols"
+    if chave in ("h2h", "dnb") or chave.startswith(("h2h", "dnb")):
+        return "1x2"
+    if chave.startswith("btts"):
+        return "ambas_marcam"
+    if chave.startswith("correct_score"):
+        return "placar_exato"
+    if chave.startswith("double_chance"):
+        return "dupla_chance"
+    if chave.startswith("player"):
+        return "prop_estatistico"
+    if chave.startswith(("games", "sets")):
+        return "tenis"
+    return "outros"
+
+
+def familia_mercado_da_oferta(legs) -> str:
+    """Família da PIOR perna (a de consenso, se houver) — mesma regra de
+    `classe_mercado_da_oferta`: com pernas de famílias diferentes num combo,
+    a que estiver em consenso é a que domina o risco, então é ela quem
+    identifica a oferta pra fins de diversidade de alerta."""
+    sem_cobertura = [l for l in legs if not l.suportado]
+    alvo = sem_cobertura[0] if sem_cobertura else (legs[0] if legs else None)
+    return _familia_da_perna(alvo) if alvo is not None else "outros"
+
+
 @dataclass
 class ValueResult:
     odd_boost: float

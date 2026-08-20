@@ -52,11 +52,13 @@ class BaseAlertas(unittest.TestCase):
         self.storage.close()
         self._tmp.cleanup()
 
-    def resultado_value(self, of: Offer, edge: float = 7.5) -> dict:
+    def resultado_value(self, of: Offer, edge: float = 7.5,
+                         familia_mercado: str = "outros") -> dict:
         return {**of.to_row(), "status": "avaliada", "is_value": True,
                 "edge_pct": edge, "odd_justa": 1.12, "tipo_mercado": "simples",
                 "fonte_odd": "pinnacle", "threshold_usado": 5.0,
-                "evento_pinnacle": "Celtic vs Dundee", "match_score": 100.0}
+                "evento_pinnacle": "Celtic vs Dundee", "match_score": 100.0,
+                "familia_mercado": familia_mercado}
 
 
 class TestDedup(BaseAlertas):
@@ -376,13 +378,41 @@ class TestFilaDeAvaliacao(BaseAlertas):
 
 class TestTetoDeAlertas(BaseAlertas):
     def test_teto_de_alertas_por_ciclo_manda_os_maiores_edges(self):
-        values = [self.resultado_value(oferta(evento_id=f"e{i}"), edge=float(i))
+        # Família distinta por item: este teste cobre só o teto GERAL
+        # (`MAX_ALERTAS_POR_CICLO`), não o teto por família — esse tem teste
+        # próprio logo abaixo.
+        values = [self.resultado_value(oferta(evento_id=f"e{i}"), edge=float(i),
+                                       familia_mercado=f"fam{i}")
                   for i in range(config.MAX_ALERTAS_POR_CICLO + 5)]
         asyncio.run(self.alertador._alertar_values(values))
         self.assertEqual(len(self.notifier.enviadas), config.MAX_ALERTAS_POR_CICLO)
         # O de maior edge é o primeiro da fila.
         maior = max(v["edge_pct"] for v in values)
         self.assertIn(f"{maior:+.1f}%", self.notifier.enviadas[0])
+
+    def test_teto_por_familia_nao_deixa_uma_familia_engolir_o_ciclo(self):
+        # Mais values de "handicap" com edge alto do que o teto por família
+        # permite — o resto do ciclo tem que sobrar pra outra família, mesmo
+        # com edge menor.
+        teto = config.MAX_ALERTAS_POR_FAMILIA_POR_CICLO
+        handicaps = [self.resultado_value(oferta(evento_id=f"h{i}"),
+                                          edge=100.0 - i, familia_mercado="handicap")
+                     for i in range(teto + 3)]
+        escanteios = self.resultado_value(oferta(evento_id="corner1"),
+                                          edge=1.0, familia_mercado="escanteios")
+        asyncio.run(self.alertador._alertar_values(handicaps + [escanteios]))
+
+        enviadas = self.notifier.enviadas
+        self.assertEqual(len(enviadas), min(config.MAX_ALERTAS_POR_CICLO, teto + 1))
+        n_handicap = sum(1 for h in handicaps
+                         if any(f"{h['edge_pct']:+.1f}%" in msg for msg in enviadas))
+        self.assertEqual(n_handicap, teto, "teto por família não segurou o handicap")
+        # Só os de MAIOR edge dentro da família passam, não os últimos.
+        top_handicaps = sorted(handicaps, key=lambda h: h["edge_pct"], reverse=True)[:teto]
+        for h in top_handicaps:
+            self.assertTrue(any(f"{h['edge_pct']:+.1f}%" in msg for msg in enviadas))
+        self.assertTrue(any(f"{escanteios['edge_pct']:+.1f}%" in msg for msg in enviadas),
+                        "escanteios de edge menor devia entrar no lugar do handicap excedente")
 
 
 class TestProcessarCiclo(BaseAlertas):

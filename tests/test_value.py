@@ -21,6 +21,7 @@ from betano_superodds.value.pool_eventos import resolver_evento_id_via_pool
 from betano_superodds.value.value_calc import (avaliar_value, calcular_edge,
                                                 classe_mercado_da_perna,
                                                 classificar_confianca,
+                                                familia_mercado_da_oferta,
                                                 threshold_para)
 from betano_superodds.storage import Storage
 
@@ -330,6 +331,143 @@ class TestChaveConsenso(unittest.TestCase):
         leg = parse_leg("Total de Gols Mais de 2.5")
         self.assertTrue(leg.suportado)
         self.assertIsNone(leg.consenso_chave)
+
+
+class TestClausulaColadaAntesDoMercado(unittest.TestCase):
+    """A EsportesDaSorte escreve a cláusula de linha ANTES do nome do
+    mercado ("Mauricio 1+ Chutes ao Gol", "Union Santa Fe Mais de 5.5
+    Chutes ao Gol"), diferente da grafia Betano/pool ("Chutes no gol 1+",
+    cláusula no FIM). Dois defeitos reais, medidos contra 37 ofertas da
+    EsportesDaSorte:
+
+    1. `_limite` é ancorado em `$` — "1+" no meio do texto nunca era achado,
+       e a perna inteira caía na guarda de `lado is None`.
+    2. Quando a cláusula ERA achada (formato "mais de X", que já é busca
+       livre), a extração de entidade usava o texto sujo: "Union Santa Fe
+       Mais de 5.5" virava nome de "jogador", com a cláusula colada no fim
+       do nome — nunca casava com nada no pool.
+    """
+
+    def test_clausula_no_plus_antes_do_mercado_vira_jogador(self):
+        """Formato "N+" (convenção de prop de jogador) colado ANTES do nome
+        do mercado — antes retornava `None` (perna recusada de graça)."""
+        chave = chave_consenso("Mauricio 1+ Chutes ao Gol")
+        self.assertEqual(chave, ChaveConsenso(familia="chutes_gol",
+                                              escopo="jogador:mauricio",
+                                              lado="over", linha=0.5))
+
+    def test_clausula_no_plus_com_nome_composto(self):
+        chave = chave_consenso("Arthur Cabral 1+ Chutes ao Gol")
+        self.assertEqual(chave.escopo, "jogador:arthur cabral")
+        self.assertEqual((chave.lado, chave.linha), ("over", 0.5))
+
+    def test_regressao_betano_n_mais_no_fim_continua_igual(self):
+        """A grafia que já funcionava (cláusula no FIM, Betano/pool) não
+        pode mudar de resultado."""
+        self.assertEqual(
+            chave_consenso("Lucas Barbosa Chutes no gol 1+"),
+            ChaveConsenso(familia="chutes_gol", escopo="jogador:lucas barbosa",
+                         lado="over", linha=0.5))
+
+    def test_mais_de_colado_antes_do_mercado_vira_time_nao_jogador(self):
+        """"Union Santa Fe Mais de 5.5 Chutes ao Gol" é TOTAL DE TIME —
+        "Union Santa Fe" não pode virar `jogador:union santa fe mais de 5.5`
+        (a cláusula grudada no nome), nem `jogador:union santa fe` (um clube
+        não é gente): o resultado tem que ser `time:...`."""
+        chave = chave_consenso("Union Santa Fe Mais de 5.5 Chutes ao Gol")
+        self.assertIsNotNone(chave)
+        self.assertTrue(chave.escopo.startswith("time:"), chave.escopo)
+        self.assertNotIn("mais de", chave.escopo)
+        self.assertEqual((chave.lado, chave.linha), ("over", 5.5))
+
+    def test_clausula_sem_entidade_nenhuma_nao_vira_jogador(self):
+        """"Mais de 0.5 Cartões no 1º Tempo" não tem NENHUMA entidade —
+        só a cláusula colada antes do nome do mercado. Não pode sobrar
+        `jogador:mais de 0.5` (a própria cláusula lida como nome)."""
+        chave = chave_consenso("Mais de 0.5 Cartões no 1º Tempo")
+        self.assertIsNotNone(chave)
+        self.assertFalse(chave.escopo.startswith("jogador:"), chave.escopo)
+        self.assertEqual((chave.lado, chave.linha), ("over", 0.5))
+
+    def test_regressao_estrelabet_chutes_no_gol_mais_de_no_fim(self):
+        """Grafia EstrelaBet ("- Chutes no gol: Mais de N,5", cláusula no
+        fim) continua casando igual à grafia do pool."""
+        self.assertEqual(
+            chave_consenso("Ronaldo - Chutes no gol: Mais de 1,5"),
+            chave_consenso("Chutes a Gol - Ronaldo Mais de 1.5"))
+
+
+class TestClubePorExtensoNaoViraJogador(unittest.TestCase):
+    """`_SIGLA_DE_TIME` só reconhece sigla curta em caixa alta ("(ALA)").
+    Clube por extenso entre parênteses escapava e virava "jogador"."""
+
+    def test_clube_por_extenso_nao_e_lido_como_jogador(self):
+        chave = chave_consenso("Receber um cartão Denis Alibec (Farul Constanta): Sim")
+        self.assertIsNotNone(chave)
+        self.assertEqual(chave.escopo, "jogador:denis alibec")
+
+    def test_regressao_jogador_entre_parenteses_aninhados_continua_igual(self):
+        """Não pode regredir o caso que a função foi desenhada pra cobrir:
+        quando NÃO há nome plausível antes do parêntese ("do Jogador"), o
+        nome de verdade continua vindo de dentro dele."""
+        self.assertEqual(
+            chave_consenso("Chutes a Gol do Jogador (Carles Alena (ALA)) "
+                           "- Inclui substitutos Mais de 0.5"),
+            chave_consenso("Carles Alena Chutes no gol 1+"))
+
+    def test_regressao_sigla_curta_no_pool_continua_igual(self):
+        self.assertEqual(
+            chave_consenso("Chutes a Gol - Ângel Di Maria (ROS) Mais de 1.5"),
+            chave_consenso("Ângel Di Maria Chutes no gol 2+"))
+
+
+class TestFamiliaChutesTotal(unittest.TestCase):
+    """"Chutes" total (distinto de "chutes no/a/ao gol"/SOT) — 15.772 linhas
+    no pool (`Chutes - <Jogador>`/`Chutes do Jogador`), maior família dos
+    motivos sem cobertura, e caía inteira em "mercado não reconhecido"."""
+
+    def test_parse_leg_reconhece_chutes_total(self):
+        leg = parse_leg("Total de Chutes Mais de 25.5")
+        self.assertFalse(leg.suportado)
+        self.assertEqual(leg.motivo, "chutes total")
+        self.assertIsNotNone(leg.consenso_chave)
+        self.assertEqual(leg.consenso_chave.familia, "chutes_total")
+
+    def test_nao_engole_chutes_no_gol(self):
+        """"Chutes no gol" continua caindo na família mais específica
+        (`chutes_gol`), não na genérica nova — a ordem na lista é
+        load-bearing."""
+        leg = parse_leg("Chutes no gol Mais de 7.5")
+        self.assertEqual(leg.motivo, "chutes no gol")
+        self.assertEqual(leg.consenso_chave.familia, "chutes_gol")
+
+    def test_rotulo_com_confronto_nao_vira_entidade(self):
+        """"Over 33.5 chutes - Bolívar x São Paulo" carrega o confronto
+        inteiro colado no fim — "Bolívar x São Paulo" não pode virar nome de
+        jogador nem de time; o "x" isolado é o sinal de que é descrição de
+        jogo, não entidade."""
+        chave = chave_consenso("Over 33.5 chutes - Bolívar x São Paulo")
+        self.assertIsNotNone(chave)
+        self.assertEqual(chave.familia, "chutes_total")
+        self.assertEqual((chave.lado, chave.linha), ("over", 33.5))
+        self.assertFalse(chave.escopo.startswith("jogador:"), chave.escopo)
+        self.assertFalse(chave.escopo.startswith("time:"), chave.escopo)
+
+    def test_linha_como_numero_nu_colado_no_mercado(self):
+        """"1.5 chutes do Matheus Pereira" não tem "mais de"/"over"/"+" —
+        só o número colado no mercado. Antes desta correção a perna não
+        formava chave nenhuma (`lado=None` -> recusa)."""
+        chave = chave_consenso("1.5 chutes do Matheus Pereira")
+        self.assertIsNotNone(chave)
+        self.assertEqual(chave.familia, "chutes_total")
+        self.assertEqual((chave.lado, chave.linha), ("over", 1.5))
+
+    def test_familia_prop_no_consenso(self):
+        """Mesmo mínimo de casas alto e confiança baixa que `chutes_gol` já
+        tem — ver `consenso._FAMILIAS_PROP`/`_PROP_PALAVRAS`."""
+        from betano_superodds.value.consenso import _FAMILIAS_PROP, _eh_mercado_prop
+        self.assertIn("chutes_total", _FAMILIAS_PROP)
+        self.assertTrue(_eh_mercado_prop("Total de Chutes"))
 
 
 class TestFamiliaSetsExatosDeJogador(unittest.TestCase):
@@ -2837,6 +2975,30 @@ class TestTabelaDeConfianca(unittest.TestCase):
 
         simples = parse_leg("Resultado Final: Celtic")
         self.assertEqual(classe_mercado_da_perna(simples), "geral")
+
+    def test_familia_mercado_da_oferta_agrupa_por_familia_legivel(self):
+        """Usada só por `alerts.py` pra diversificar a SELEÇÃO de alertas —
+        granularidade mais fina que `classe_mercado` (que só distingue
+        prop/geral). Cartão/handicap continuam reconhecidos pelo mesmo dado
+        (`motivo`/`market_key`) que `classe_mercado_da_perna` já lê."""
+        cartao = parse_leg("Total de cartões 3.5: Mais de 3.5")
+        self.assertEqual(familia_mercado_da_oferta([cartao]), "cartoes")
+
+        handicap = parse_leg("Handicap: Cruzeiro (-1.5)")
+        self.assertEqual(familia_mercado_da_oferta([handicap]), "handicap")
+
+        escanteios = parse_leg("Escanteios Mais de 9.5")
+        self.assertEqual(familia_mercado_da_oferta([escanteios]), "escanteios")
+
+        totais = parse_leg("Total de Gols Mais de 2.5")
+        self.assertEqual(familia_mercado_da_oferta([totais]), "totais_gols")
+
+        simples = parse_leg("Resultado Final: Celtic")
+        self.assertEqual(familia_mercado_da_oferta([simples]), "1x2")
+
+        # Combo: a perna SEM COBERTURA (a que vai pro consenso, mais fraca)
+        # manda — mesma regra de `classe_mercado_da_oferta`.
+        self.assertEqual(familia_mercado_da_oferta([handicap, cartao]), "cartoes")
 
     def test_classificar_confianca_cobre_a_tabela_inteira(self):
         """As cinco linhas da tabela, direto na função — sem depender de

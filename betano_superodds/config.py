@@ -361,6 +361,13 @@ LIQUIDACAO_RED_COM_PERNA_INDEFINIDA = os.getenv(
 # inflado em massa, isso evita despejar centenas de mensagens no chat.
 MAX_ALERTAS_POR_CICLO = int(os.getenv("MAX_ALERTAS_POR_CICLO", "10"))
 
+# Teto por família de mercado DENTRO do teto acima — sem isto, um ciclo com
+# vários handicaps (ou outro tipo qualquer) de edge alto enche o teto sozinho
+# e mercados menos frequentes nunca aparecem, mesmo sendo jogos diferentes e
+# sem correlação nenhuma entre si. Ver `value_calc.familia_mercado_da_oferta`.
+MAX_ALERTAS_POR_FAMILIA_POR_CICLO = int(
+    os.getenv("MAX_ALERTAS_POR_FAMILIA_POR_CICLO", "3"))
+
 # A partir de que ganho o alerta avisa pra conferir o teto de aposta no site.
 #
 # O ideal seria mostrar o teto real, mas a API da Altenar não publica nenhum

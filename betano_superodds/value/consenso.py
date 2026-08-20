@@ -131,6 +131,7 @@ def _idade_max_min(capturados: list[str], agora: datetime | None = None) -> int:
 _PROP_PALAVRAS = re.compile(
     r"cart(õ|o)es|cart(ã|a)o"
     r"|chutes?\s+(no|a|ao)\s+gol"
+    r"|\bchutes?\b"
     r"|marcar\s+(em\s+qualquer\s+momento|a\s+qualquer)"
     r"|artilheiro|marcador"
     r"|defesas?\s+d[oe]\s+goleiro|impedimentos?"
@@ -153,7 +154,7 @@ def _eh_mercado_prop(market_nome: str) -> bool:
 # Pinnacle nenhuma por trás, a classe mais fraca da tabela de confiança da
 # skill `value-bet-methodology`. Nascer no mínimo genérico e ser apertado
 # depois seria fazer o caminho na ordem errada.
-_FAMILIAS_PROP = frozenset({"cartoes", "chutes_gol", "artilheiro",
+_FAMILIAS_PROP = frozenset({"cartoes", "chutes_gol", "chutes_total", "artilheiro",
                             "defesas_goleiro", "impedimentos"})
 
 

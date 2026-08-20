@@ -19,7 +19,7 @@ from .matcher import encontrar_evento
 from .models import Matchup
 from .pinnacle import PinnacleScraper
 from .stats_check import checar_stats
-from .value_calc import avaliar_value, classe_mercado_da_oferta
+from .value_calc import avaliar_value, classe_mercado_da_oferta, familia_mercado_da_oferta
 
 log = logging.getLogger(__name__)
 
@@ -181,6 +181,7 @@ def avaliar_oferta(oferta: dict, matchups: list[Matchup],
     # classe é da OFERTA inteira — a perna pior manda, igual à fonte.
     odd_boost = float(oferta["odd_boost"])
     classe_mercado = classe_mercado_da_oferta(legs)
+    familia_mercado = familia_mercado_da_oferta(legs)
     value = avaliar_value(odd_boost, fair.odd_justa, fair.tipo_mercado,
                           fonte_odd=fair.fonte_odd,
                           classe_mercado=classe_mercado,
@@ -236,6 +237,7 @@ def avaliar_oferta(oferta: dict, matchups: list[Matchup],
         "confianca": value.confianca,
         "flag": value.flag,
         "classe_mercado": classe_mercado,
+        "familia_mercado": familia_mercado,
         "interpolada": fair.interpolada,
         "derivada": fair.derivada,
         "por_consenso": fair.por_consenso,
