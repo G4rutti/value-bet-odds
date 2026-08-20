@@ -154,6 +154,18 @@ ENABLE_NOVIBET = os.getenv("ENABLE_NOVIBET", "1") not in ("0", "false", "False")
 # entrada carrega lógica (`super_odds_url`) além de dados.
 ENABLE_SPORTINGTECH = os.getenv("ENABLE_SPORTINGTECH", "1") not in ("0", "false", "False")
 
+# ---------------------------------------------------------------------------
+# Lottu — plataforma ngbras, "Odds Turbinadas"
+# ---------------------------------------------------------------------------
+
+# Nunca esteve no levantamento original — achada só porque apareceu no
+# histórico de apostas do usuário. `/event/highlights`, achada em 2026-08-20
+# testando rotas vizinhas à `/event/live-summary` (que a página usa só pra
+# sidebar, sem boost). Pública, sem cookie, mas exige o header
+# `Origin: https://www.lottu.bet.br` — sem ele, 400 "Missing parameters". Ver
+# CASAS-PENDENTES.md seção 8.
+ENABLE_LOTTU = os.getenv("ENABLE_LOTTU", "1") not in ("0", "false", "False")
+
 # `ENABLE_ESPORTIVA` é o nome antigo, de quando a Altenar era uma casa só.
 ENABLE_ALTENAR = os.getenv(
     "ENABLE_ALTENAR", os.getenv("ENABLE_ESPORTIVA", "1")

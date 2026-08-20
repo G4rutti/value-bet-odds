@@ -17,6 +17,7 @@ from .casadeaposta import CasaDeApostaScraper
 from .casadeaposta_livro import CasaDeApostaLivroScraper
 from .diff import DiffResult, diff_offers
 from .esportiva import EsportivaScraper
+from .lottu import LottuScraper
 from .novibet import NovibetScraper
 from .sportingtech import CASAS_SPORTINGTECH, SportingTechScraper
 from .superbet import SuperbetScraper
@@ -221,6 +222,19 @@ async def coletar(
             dt_casa = time.monotonic() - tc
             log.warning("Novibet falhou neste ciclo (%.1fs): %s", dt_casa, exc)
 
+    if config.ENABLE_LOTTU:
+        tc = time.monotonic()
+        try:
+            async with LottuScraper() as sc:
+                casa_offers = await sc.scrape()
+            dt_casa = time.monotonic() - tc
+            log.info("Lottu: %d ofertas em %.1fs", len(casa_offers), dt_casa)
+            offers += casa_offers
+            raspadas.add("Lottu")
+        except Exception as exc:  # noqa: BLE001 — mesma política das outras casas
+            dt_casa = time.monotonic() - tc
+            log.warning("Lottu falhou neste ciclo (%.1fs): %s", dt_casa, exc)
+
     # Superbet: NÃO entra em `raspadas` e não soma em `offers` — ela não é
     # fonte de oferta (a rota do boost dela nunca foi achada), é a terceira
     # família de feed do pool de consenso. Pôr o nome dela em `raspadas` faria
@@ -409,6 +423,7 @@ async def main_async(once: bool, interval: int, avaliar: bool) -> int:
             log.info("casas Altenar: desligadas")
         log.info("CasaDeAposta: %s", "ligada" if config.ENABLE_CASADEAPOSTA else "desligada")
         log.info("Novibet: %s", "ligada" if config.ENABLE_NOVIBET else "desligada")
+        log.info("Lottu: %s", "ligada" if config.ENABLE_LOTTU else "desligada")
         log.info("SportingTech (%s): %s",
                  ", ".join(c.nome for c in CASAS_SPORTINGTECH),
                  "ligada" if config.ENABLE_SPORTINGTECH else "desligada")

@@ -7,7 +7,9 @@ Em 2026-08-05, a Novibet e a EsportesDaSorte também foram resolvidas (a
 Novibet: o erro genérico que parecia "faltam os IDs" era na verdade headers
 de contexto faltando; a EsportesDaSorte: a rota certa não era nenhum dos
 dois candidatos óbvios, era um esporte virtual à parte — ver as seções
-próprias abaixo). **17 permanecem pendentes** de fato.
+próprias abaixo). Em 2026-08-20 a Lottu também foi resolvida (ver
+[seção 8](#8-bet7k-e-lottu--casas-fora-do-levantamento-original-de-36-2026-08-20)).
+**16 permanecem pendentes** de fato.
 
 **Nenhuma está descartada.** "Pendente" aqui significa *não resolvido pelo
 método usado* — que foi HTTP puro, sem browser. A maioria cai por falta de
@@ -361,7 +363,7 @@ que os outros itens desta lista, mas bem mais perto da solução do que antes.
 | API existe mas exige auth/header ou token de sessão | 5 | média |
 | Plataforma identificada, transporte é WebSocket | 2 | alta |
 | Plataforma identificada, rota não descoberta | 2 | baixa |
-| Config de API carregada em runtime | 8 | baixa/média |
+| Config de API carregada em runtime | 7 | baixa/média |
 | Anti-bot bloqueando antes da aplicação | 1 | muito alta |
 | Grupo internacional, plataforma fechada | 2 | alta |
 
@@ -375,10 +377,11 @@ contagem de pendentes. A OleyBet migrou pra "exige auth/header": a rota
 só falta confirmar o cookie prévio que essa casa exige — não é mais "rota
 desconhecida".
 
-Total: **17** ainda pendentes (dos 25 originais, 6 resolvidos em 2026-08-04 e
+Total: **16** ainda pendentes (dos 25 originais, 6 resolvidos em 2026-08-04,
 Novibet + EsportesDaSorte resolvidas em 2026-08-05 —
-[seção 0](#0-resolvidas-em-2026-08-04--captura-de-xhr-em-browser-real)). A
-Betsson aparece no motivo 1 e é citada de novo no motivo 6 como contexto de
+[seção 0](#0-resolvidas-em-2026-08-04--captura-de-xhr-em-browser-real) — e
+Lottu resolvida em 2026-08-20 — [seção 8](#8-bet7k-e-lottu--casas-fora-do-levantamento-original-de-36-2026-08-20)).
+A Betsson aparece no motivo 1 e é citada de novo no motivo 6 como contexto de
 grupo — está contada uma vez só. PixBet migrou do motivo 3 (rota não
 descoberta) para o motivo 1 (token de sessão) depois da reclassificação.
 
@@ -449,8 +452,9 @@ depois de carregar. Só captura de XHR em browser real resolve.
 2026-08-04** — todas resolvidas com o método previsto (captura de XHR em
 browser real). Ver [seção 0](#0-resolvidas-em-2026-08-04--captura-de-xhr-em-browser-real).
 
-**Restam: IceBet, BravoBet, Panda, JogaJunto, VivaSorte, Betsul, Lottu, KTO**
-— ainda não atacadas com o mesmo método.
+**Restam: IceBet, BravoBet, Panda, JogaJunto, VivaSorte, Betsul, KTO** —
+ainda não atacadas com o mesmo método. (A Lottu saiu desta lista em
+2026-08-20 — ver [seção 8](#8-bet7k-e-lottu--casas-fora-do-levantamento-original-de-36-2026-08-20).)
 
 ## 5. Anti-bot bloqueando antes da aplicação
 
@@ -530,8 +534,9 @@ ordem, para quem for retomar:
 3. **BetVip** — achar de onde vem o ID numérico do brand Betby.
 4. **Betnacional** — base conhecida (`bet6.com.br`), falta mapear a rota.
 5. **PixBet** — via FSB Tech, exige entender o fluxo do `operatorToken`.
-6. O resto (IceBet, BravoBet, Panda, JogaJunto, VivaSorte, Betsul, Lottu, KTO)
-   — mesmo método de captura de XHR em browser real que resolveu a seção 0.
+6. O resto (IceBet, BravoBet, Panda, JogaJunto, VivaSorte, Betsul, KTO) —
+   mesmo método de captura de XHR em browser real que resolveu a seção 0 (a
+   Lottu saiu desta lista em 2026-08-20, ver seção 8).
 
 O método que resolveu a seção 0 é reaplicável aqui: abrir a aba de esportes no
 browser, ler `performance.getEntriesByType('resource')` (mais confiável que a
@@ -550,3 +555,193 @@ Mas as **10 casas Altenar já multiplicam o volume por ~5 sem código novo**.
 Faz sentido ligar e medir isso primeiro — se o edge continuar negativo em todas
 elas, a hipótese "mais volume resolve" fica enfraquecida, e caçar as pendentes
 uma a uma passa a ser esforço com retorno duvidoso.
+
+---
+
+## 8. Bet7k e Lottu — investigadas a pedido do usuário (2026-08-20)
+
+Bet7k **não** estava no levantamento original — nem no `LEVANTAMENTO-CASAS.md`,
+nem em lugar nenhum deste doc. A Lottu já estava listada no motivo 4 ("config
+carregada em runtime", ver a seção 4 acima) desde o levantamento original,
+só nunca tinha sido atacada. As duas apareceram no histórico de apostas do
+usuário (`csv_apostas/`) sem estar no roll, e foram investigadas via captura
+de XHR em browser real a pedido dele. **Bet7k foi abandonada** depois de duas
+rodadas sem convergir (decisão do usuário); **a Lottu foi resolvida e
+implementada** (`betano_superodds/lottu.py`) — saiu da contagem de pendentes.
+
+### Bet7k — FSB Tech, pública, endpoint de boost nunca fechado — ABANDONADA
+
+Domínio real `7k.bet.br` (`bet7k.bet.br` redireciona). Sportsbook roda via
+iframe **FSB Tech**, mesma plataforma da PixBet (motivo 1 da tabela acima),
+tenant `kbet`:
+
+```
+https://prod20350-kbet-152319626.fssb.io/br-pt/spbk?operatorToken=logout
+```
+
+Diferente da PixBet, **`operatorToken=logout` é público de verdade** — não é
+um token de sessão do usuário, é o valor literal que a FSB usa para sessão
+anônima. Confirmado com `curl_cffi.Session` limpa, sem cookie nenhum: o GET
+devolve os cookies `authorization`/`session` (JWT com `customerType:"anon"`,
+`customerId:-1`) sozinho, sem precisar de warm-up em `7k.bet.br` primeiro.
+`agentId=152319626` e `siteId=20350` (do JWT) identificam o tenant nos
+endpoints abaixo.
+
+Dois endpoints REST confirmados funcionando **fora do browser**, com
+`curl_cffi impersonate="chrome"` puro:
+
+```bash
+GET /api/pulse/snapshot/events?lang=BR-PT
+    # listagem completa (~2900 eventos), sem odds — Fixture + Outright,
+    # campo Tags (só viu "FastMarket", nada de boost)
+
+GET /api/eventpage/events/{eventId}?hideX25X75Selections=false
+    # detalhe completo de 1 evento — TODOS os mercados/seleções com odds
+    # (decimal + americana + fracionária), formato array posicional
+    # compacto (não é objeto com chaves nomeadas), ~2,5MB por evento
+```
+
+A promoção "**Mega Impulso**" (badge `BB Mega Impulso`, visível na home em
+`/esportes`) é confirmada como feature nativa da FSB — achada lendo o bundle
+`index-BOZo7ChF.min.js` do iframe: enum `BoostedOdds=6`/`BoostedBetBuilder=7`,
+tipo `tradingPromotionBoostedOdds`/`tradingPromotionBoostedBuilder`, com
+campos `BoostType`/`BoostLevel`/`MaxStake`/`DbTrueOdds` (odd "verdadeira") vs
+odd de exibição — ou seja, é exatamente o par original/turbinada que o
+projeto precisa, não uma promoção de bônus de conta como a da Lottu abaixo.
+
+**O que falta**: o evento de teste usado (Corinthians x Rosario Central, que
+mostrava o badge na home) não tinha o campo de promoção populado no payload
+de `/api/eventpage/events/{id}` — o texto "Boost" não aparece em lugar nenhum
+da resposta. A rota que o app usa nativamente para isto,
+`/api/pulse/markets?agentId&filter=EventId=="..."&lang&siteId` (achada lendo
+`gAn`/`pAn`/`mAn` no bundle, e **confirmada no Network do browser real** com
+essa URL exata, 200), **não responde igual fora do browser** — `curl_cffi`
+com os mesmos headers/cookies devolve o shell HTML da SPA (mesmo
+comportamento de uma rota inexistente), enquanto o browser recebe JSON.
+Suspeita: WAF/anti-bot específico nesse path (é o mais pollado, candidato
+natural a fingerprinting adicional além do TLS). Não testado ainda: replay
+com `curl_cffi` a partir de uma sessão que primeiro passou por
+`/api/eventpage/events/{id}` várias vezes (aquecer o padrão de tráfego) ou
+capturar a chamada com um evento que tenha o Mega Impulso confirmado ativo
+*no momento da captura* (o evento de teste pode ter perdido o boost entre a
+navegação e a inspeção — combos turbinados saem do ar rápido).
+
+**Segunda rodada (mesmo dia)**: tentado destravar `/api/pulse/markets` por
+mais três ângulos, nenhum resolveu — (1) replicar a sequência completa de
+chamadas que o browser faz antes de pedir markets (`snapshot/events` →
+`sportscenter/carousels/events-with-items` → `master/match-tracker/list` →
+`betslip/combo-bonus/bonuses` → `eventpage/events/{id}`), pra descartar um
+gate por padrão de tráfego — sem efeito; (2) extrair do browser real quais
+cookies existem além de `authorization`/`session` (achados `operatorToken` e
+`events_updates`, ambos ausentes na sessão `curl_cffi`) e replicá-los —
+sem efeito; (3) inspecionar os headers da resposta 200-fantasma: vem com
+`x-powered-by: Express` e `content-type: text/html`, **a mesma assinatura**
+de rota genuinamente inexistente vista nos testes de path chutado errado
+(diferente do `/api/eventpage/...`, que sempre veio `application/json`).
+
+Isso muda a leitura: pode não ser (só) WAF bloqueando um client não-browser
+— é bem possível que `/api/pulse/markets` seja código mort/de outro
+deployment da FSB (a rota `gAn`/`WBn` decodificada do bundle pode nem ser o
+transporte usado de fato pela view "South American Plus"), e o Mega Impulso
+esteja vindo por outro caminho que só aparece no primeiro paint (dado
+embutido no HTML/SSR, não uma chamada de API separada). Não dá pra decidir
+entre as duas hipóteses sem DevTools aberto por um humano num evento com o
+boost confirmado ativo no momento — as ferramentas de captura automatizada
+usadas nesta sessão (`read_network_requests`/`performance` via
+`javascript_tool`) não conseguiram flagrar a chamada real nem uma vez,
+mesmo com a URL exata já em mãos.
+
+**Veredito final: abandonada** (decisão do usuário em 2026-08-20, depois da
+segunda rodada não convergir). Fixture list e detalhe de evento com odds
+cheias funcionam via `curl_cffi`, mas o endpoint do Mega Impulso nunca foi
+fechado e não vale mais o esforço adicional de captura manual. Não retomar
+sem motivo novo — se um dia valer a pena, o ponto de partida certo é
+DevTools manual num evento com o boost confirmado ativo (ver o histórico
+acima pra não repetir os caminhos já testados).
+
+### Lottu — pública, GO — endpoint único pra toda a seção "Odds Turbinadas"
+
+Domínio `lottu.bet.br` → `www.lottu.bet.br`. Plataforma **ngbras** (Angular
+first-party + API própria), host de dados `alpha-sb.ngbras.com`. Todos os
+endpoints abaixo são públicos — sem cookie, sem login — mas **exigem o header
+`Origin: https://www.lottu.bet.br`**; sem ele, `400
+{"code":3004,"message":"Missing parameters","info":{"parameter":"origin"}}`
+(tem que ser header HTTP — mandar `origin` como query param não funciona).
+
+**Primeira pista era falsa**: a promoção "Acelerador de Odds" (banner
+principal da home) É um bônus de fidelidade — `bonus_type: "ODDS_BOOST"` em
+`/promotion/available-sportsbook`, multiplicador automático por tamanho de
+múltipla, sem odd original/turbinada fixa. Achado inicialmente e descartado
+por não caber no schema `Offer`. **Mas existe uma seção separada**, achada só
+pelo usuário passando a URL direto (`/s/CLE?group_type=GROUP&identifier=
+oddsturbinadas`) — o menu "Odds Turbinadas" de verdade, com cards de combo
+com odd original riscada → odd turbinada, exatamente o padrão do projeto.
+
+O endpoint que alimenta essa tela (achado por tentativa de rota depois que a
+extração de rede via browser falhou repetidas vezes nessa página — ver nota
+de higiene abaixo) é:
+
+```
+GET https://alpha-sb.ngbras.com/event/highlights
+```
+
+Devolve TODOS os "highlights" ativos (32 na sondagem) num array plano, sem
+paginação nem filtro por evento — cada item já é um combo pronto com odd
+original e turbinada:
+
+```json
+{
+  "_id": "6a85eb9e1d02191929637786",
+  "date": "2026-08-20T22:29:50.000Z",
+  "status": "NOT_STARTED",
+  "country": "Brasil",
+  "championship": "Odds Turbinadas - Brasileiro Série B",
+  "question": "Athletic x CRB",
+  "group": "oddsturbinadas",
+  "title": "PRESSÃO ATHLETICANA!",
+  "odds": {
+    "answers": [{
+      "answer": "Athletic Para Ganhar Um Dos Tempos & Athletic Para Ter o Maior Número de Escanteios",
+      "answer_list": ["Athletic Para Ganhar Um Dos Tempos", "Athletic Para Ter o Maior Número de Escanteios"],
+      "value": 4.75,
+      "old_value": 3.97
+    }]
+  }
+}
+```
+
+Mapeamento direto pro `Offer` (`ADAPTER_CONTRACT.md` §2): `_id` → evento_id;
+`question` (formato `"A x B"`, precisa normalizar o `" x "` pro separador
+que `matcher.split_times` reconhece) → evento; `championship` → liga;
+`odds.answers[].answer` → mercado, com as pernas separadas por `&`
+(**precisa converter pro `SEPARADOR_PERNAS` do projeto antes de montar
+`mercado`** — mesma armadilha da SportingTech documentada no contrato,
+§2.3); `old_value` → odd_original; `value` → odd_boost; `date` → kickoff
+(replicar em `inicio_evento` e `valido_ate`, só uma data disponível).
+
+**Campo `group` distingue dois tipos de turbinada** na sondagem: 28 itens
+`"oddsturbinadas"` e 4 `"CasadinhasTurbinadas"` (mesmo formato de odds, só
+outro rótulo — same-game combo). Nenhum outro valor de `group` visto; não dá
+pra saber se o endpoint filtra por seção do site ou sempre devolve tudo — a
+sondagem foi feita direto na URL da seção "Odds Turbinadas" e todos os 32
+vieram junto, então por ora tratar os dois grupos como a mesma família de
+oferta.
+
+**Nota de higiene da sondagem**: a extração via `read_network_requests`/
+`performance.getEntriesByType` no browser falhou consistentemente pra achar
+esse endpoint nessa página específica (só capturava
+`/event/live-summary`, usado pela sidebar "Partidas Populares", não pelo
+conteúdo principal) — o endpoint certo só apareceu tentando variações
+plausíveis de rota (`/event/highlights`) fora do browser depois que
+`/widget/{identifier}` devolveu `401` (rota existe, exige auth — descartada)
+em vez do `404` de rota inexistente. Fica registrado porque é um padrão
+reaproveitável quando a captura de rede falhar: testar variações de rota
+vizinhas às que já respondem, usando 404 vs "outro erro" pra distinguir rota
+inexistente de rota real com barreira.
+
+**Veredito: GO — implementada.** API pública, sem login, endpoint único e
+simples (não precisa nem de sessão anônima como a Bet7k) — mais fácil que
+qualquer outra casa já implementada. Adapter em `betano_superodds/lottu.py`
+(Padrão A), `ENABLE_LOTTU` em `config.py`, wired em `main.py`, testes em
+`tests/test_lottu.py`. Rodada isolada em 2026-08-20 trouxe 32 ofertas reais
+(Copa Libertadores, Copa Sul-Americana, Brasileiro Série B).
