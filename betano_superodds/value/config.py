@@ -181,13 +181,23 @@ CONSENSO_MIN_CASAS_PROP = int(os.getenv("CONSENSO_MIN_CASAS_PROP", "6"))
 # porque compartilham o mesmo feed; Betano é outra; casa fora das duas é a
 # própria).
 #
-# Por que o default é 1 pros dois (efetivamente DESLIGADO): hoje só existe
-# 1 casa Betano por evento na minoria dos eventos — ligar isto agora mataria
-# cobertura real sem necessidade, porque a maioria dos consensos ainda é só
-# Altenar. O dono liga subindo o env (ex.: `CONSENSO_MIN_FAMILIAS=2`) quando
-# decidir que quer o gate rígido, sabendo que isso reduz cobertura — a mesma
-# decisão consciente que já rege `n_precos` como diagnóstico (ver o cabeçalho
-# de `consenso.py`).
+# `CONSENSO_MIN_PRECOS` continua em 1 (efetivamente desligado): hoje a
+# maioria dos consensos é só-Altenar, e recusar por preço distinto cortaria
+# cobertura real sem necessidade — fica como diagnóstico (`n_precos_consenso`
+# na saída), não como gate.
+#
+# `CONSENSO_MIN_FAMILIAS`: tentei subir o default de 1 pra 2 em 2026-08-13
+# (pedido do dono) e revertido no mesmo dia — rodar a suíte de testes com o
+# default em 2 quebrou 13 casos em `TestConsenso`/`TestConsensoNoPipeline`
+# (inclusive `test_defaults_de_familia_nao_mudam_comportamento_de_hoje`, uma
+# regressão explícita já escrita pra travar exatamente este valor), todos
+# porque as fixtures (e a realidade: ~90% dos consensos hoje são só-Altenar,
+# ver cabeçalho de `consenso.py`) só têm 1 família. Ligar isto por padrão sem
+# medir primeiro cortaria a maior parte da cobertura via consenso de vez —
+# grande demais pra decidir no automático. Continua OFF, exatamente como
+# antes: o dono liga subindo `CONSENSO_MIN_FAMILIAS=2` via env quando quiser,
+# depois de medir com `avaliar.py --limit 200 --todas` (comparar quantos
+# `status=avaliada` viram `sem_odd_justa` com o gate ligado).
 CONSENSO_MIN_PRECOS = int(os.getenv("CONSENSO_MIN_PRECOS", "1"))
 CONSENSO_MIN_FAMILIAS = int(os.getenv("CONSENSO_MIN_FAMILIAS", "1"))
 
@@ -328,6 +338,39 @@ MODELO_ERRO_MAX = float(os.getenv("MODELO_ERRO_MAX", "0.0004"))
 # marcam + escanteios" a +90% de edge só porque o ajuste ficou em 0.00074.
 MODELO_ERRO_MAX_CORRELACAO = float(
     os.getenv("MODELO_ERRO_MAX_CORRELACAO", "0.002"))
+
+# ---------------------------------------------------------------------------
+# Curadoria (`curadoria.py`) — veredito estruturado sobre os sinais do
+# SofaScore, com poder de veto real
+# ---------------------------------------------------------------------------
+#
+# Isto é uma camada NOVA por cima da checagem legada que já existe
+# (`pipeline._UM_DEGRAU_ABAIXO`, sempre um rebaixamento de confiança, nunca
+# um veto). O legado continua rodando do jeito que sempre rodou enquanto os
+# dois convivem — nenhuma flag daqui desliga ele. Mesmo padrão de
+# `MODELO_ALERTA_ATIVO`: nasce OFF, calcula/grava, só afeta o envio quando
+# alguém decidir que está calibrado (ver `query.py --curadoria`).
+
+# Liga a COLETA + julgamento do veredito novo (grava em `veredito_curadoria`,
+# sqlite). Independente de `STATS_SOFASCORE_ATIVO` (`pipeline.py`) de
+# propósito: dá pra rodar as duas camadas em paralelo, cada uma escrevendo
+# seu próprio campo, sem brigar por `saida["confianca"]`.
+CURADORIA_ATIVA = os.getenv("CURADORIA_ATIVA", "0") not in ("0", "false", "False")
+
+# Aplica o veredito de verdade (veto derruba `is_value`, degrau rebaixa
+# confiança e some no stake). Nasce OFF mesmo com CURADORIA_ATIVA=1 — modo
+# sombra primeiro, sempre: só liga depois de comparar `veredito_curadoria`
+# com `liquidacoes` reais (`query.py --curadoria`) e confirmar que "vetado"
+# de fato prediz red mais que "aprovado".
+CURADORIA_ENFORCE = os.getenv("CURADORIA_ENFORCE", "0") not in ("0", "false", "False")
+
+# Quantos sinais graves (notícia fresca, combo diverge do histórico, forma
+# recente ruim) precisam concordar pra virar veto — não é soma de score
+# oculta, é contagem de sinais nomeados (ver `curadoria._julgar`). Um sinal
+# isolado nunca veta sozinho, mesma garantia que a checagem legada já dava;
+# a diferença é que 2+ sinais concordando agora pesam mais que um rebaixamento
+# de 1 degrau. Calibrável — nasce em 2, sem dado real medido ainda.
+CURADORIA_MIN_SINAIS_VETO = int(os.getenv("CURADORIA_MIN_SINAIS_VETO", "2"))
 
 # ---------------------------------------------------------------------------
 # Stake (quanto apostar), em unidades

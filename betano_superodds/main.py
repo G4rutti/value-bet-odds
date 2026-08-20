@@ -14,6 +14,7 @@ import time
 from . import config
 from .alerts import Alertador
 from .casadeaposta import CasaDeApostaScraper
+from .casadeaposta_livro import CasaDeApostaLivroScraper
 from .diff import DiffResult, diff_offers
 from .esportiva import EsportivaScraper
 from .novibet import NovibetScraper
@@ -234,6 +235,21 @@ async def coletar(
                      len(sc.mercados_vistos), time.monotonic() - tc)
         except Exception as exc:  # noqa: BLE001 — mesma política das outras casas
             log.warning("Superbet falhou neste ciclo (%.1fs): %s",
+                        time.monotonic() - tc, exc)
+
+    # CasaDeAposta (livro): mesma política que a Superbet — NÃO entra em
+    # `raspadas` e não soma em `offers`, é a 4ª família de feed do pool de
+    # consenso, não fonte de oferta.
+    if config.ENABLE_CASADEAPOSTA_LIVRO:
+        tc = time.monotonic()
+        try:
+            async with CasaDeApostaLivroScraper(alvos=alvos) as sc:
+                await sc.scrape()
+                mercados += sc.mercados_vistos
+            log.info("CasaDeAposta (livro): %d mercado(s) p/ consenso em %.1fs",
+                     len(sc.mercados_vistos), time.monotonic() - tc)
+        except Exception as exc:  # noqa: BLE001 — mesma política das outras casas
+            log.warning("CasaDeAposta (livro) falhou neste ciclo (%.1fs): %s",
                         time.monotonic() - tc, exc)
 
     if config.ENABLE_SPORTINGTECH:

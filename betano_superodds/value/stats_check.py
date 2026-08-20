@@ -2,7 +2,7 @@
 
 Isto NÃO substitui o edge — o mercado (Pinnacle) já precifica o jogo melhor do
 que qualquer estatística que a gente calcule por fora. O uso legítimo é
-estreito, em duas frentes:
+estreito, em três frentes:
 
 1. **Corrigir combo.** A odd justa de um combo multiplica as pernas assumindo
    independência (ver `value-bet-methodology`, seção 4). Quando as pernas são
@@ -12,6 +12,14 @@ estreito, em duas frentes:
    que o mercado pode não ter precificado ainda — motivo pra DESCONFIAR mais
    de um edge alto, nunca pra confiar mais. `flag_noticia_fresca=True` só
    empurra a confiança pra baixo; nunca pra cima.
+3. **Momento recente.** A taxa de acerto do PRÓPRIO predicado da perna (não
+   um "forma do time" genérico) nos últimos jogos, comparada à taxa de base
+   do histórico mais longo. `forma_desfavoravel=True` só quando a taxa
+   recente caiu visivelmente — mesmo princípio dos outros dois: só empurra
+   pra baixo.
+
+Estes três sinais alimentam o veredito estruturado de `curadoria.py`, que
+decide aprovar/rebaixar/vetar — este módulo só COLETA, nunca decide.
 
 Fonte: `api.sofascore.com` — pública, sem login, sem cookie (ver a seção
 "Achado real — SofaScore" na skill `network-endpoint-recon`).
@@ -19,11 +27,16 @@ Fonte: `api.sofascore.com` — pública, sem login, sem cookie (ver a seção
 Limite honesto de escopo
 -------------------------
 `freq_conjunta_historica` só é calculável quando TODAS as pernas do combo são
-função do placar (HT/FT) de UM time em comum (ou são fatos do jogo inteiro,
-tipo BTTS/total de gols, que não precisam de time específico). Perna de
-cartão, chute a gol, escanteio ou prop de jogador não tem dado nenhum aqui —
-outro endpoint, outro volume. Nesses casos o campo sai `None`, nunca `False`:
-`False` afirmaria "não diverge", que é um sinal inventado.
+função do placar (HT/FT) de UM time em comum, escanteio/total de cartões do
+jogo, ou fatos do jogo inteiro (BTTS/total de gols) que não precisam de time
+específico. Escanteio e "total de cartões" pedem 1 request A MAIS por jogo
+histórico (`/event/{id}/statistics`, ver `_enriquecer_estatisticas_extra`) —
+só é pago quando alguma perna realmente precisa, e só pros primeiros
+`N_JOGOS_ESTATISTICAS_EXTRA` jogos, não os 15 inteiros. Chute a gol, cartão
+por TIME/1x2, e qualquer prop de jogador (artilheiro incluso) continuam sem
+dado nenhum aqui — outro endpoint (jogador, não time), não investigado ainda.
+Nesses casos o campo sai `None`, nunca `False`: `False` afirmaria "não
+diverge", que é um sinal inventado.
 
 Reusa `market_parser.parse_leg` pra decidir SE uma perna é função de placar
 (mesma lógica que decide se a Pinnacle cobre) e `matcher.encontrar_evento` /
@@ -335,12 +348,27 @@ def _extrair_quando(evento: dict) -> str | datetime | None:
 
 @dataclass
 class JogoHistorico:
-    """Um jogo já encerrado, normalizado pra perspectiva do time observado."""
+    """Um jogo já encerrado, normalizado pra perspectiva do time observado.
+
+    Gols/HT vêm de graça no mesmo payload que lista os jogos (`jogos_time`).
+    Escanteios/cartões NÃO — pedem 1 request a mais em `/event/{id}/statistics`
+    POR JOGO, então nascem `None` e só são preenchidos sob demanda por
+    `_enriquecer_estatisticas_extra` quando alguma perna realmente precisa
+    (ver `N_JOGOS_ESTATISTICAS_EXTRA`). `event_id`/`_eh_casa` existem só pra
+    viabilizar esse enriquecimento tardio — não fazem parte do "resultado",
+    são o endereço de onde buscar o resto se for preciso.
+    """
 
     gols_pro: int
     gols_contra: int
     ht_pro: int | None
     ht_contra: int | None
+    event_id: int | None = None
+    _eh_casa: bool | None = None
+    escanteios_pro: int | None = None
+    escanteios_contra: int | None = None
+    cartoes_pro: int | None = None
+    cartoes_contra: int | None = None
 
 
 def _jogo_valido(ev: dict) -> bool:
@@ -381,12 +409,89 @@ def _historico_time(cliente: SofaScoreClient, team_id: int,
             else:
                 ht_pro, ht_contra = (ht_h, ht_a) if eh_casa else (ht_a, ht_h)
             saida.append(JogoHistorico(gols_pro=gols_pro, gols_contra=gols_contra,
-                                       ht_pro=ht_pro, ht_contra=ht_contra))
+                                       ht_pro=ht_pro, ht_contra=ht_contra,
+                                       event_id=ev.get("id"), _eh_casa=eh_casa))
         if len(saida) >= n_minimo:
             break
     # mais recente primeiro (a lista da API vem crescente; a gente lê do fim)
     saida.reverse()
     return saida[:n_alvo]
+
+
+# ------------------------------------------------------------------
+# escanteios/cartões do histórico — sob demanda, não de graça como gols
+# ------------------------------------------------------------------
+#
+# Reusa o parser de `/event/{id}/statistics` que `liquidacao.py` já tem
+# (`_parse_estatisticas`, batizado ali por causa de `Intervalo` — o SofaScore
+# OMITE estatística que vale zero, então ausência é ambígua, não é 0).
+# Import é feito DENTRO da função, não no topo do módulo: `liquidacao.py` já
+# importa de `stats_check.py` (`_matchups_candidatos`), então um import no
+# topo aqui criaria ciclo de módulo. Adiado, resolve sem problema — os dois
+# módulos já estão totalmente carregados no momento em que isto roda.
+
+# Teto de jogos enriquecidos por chamada: ao contrário de gols/HT (que vêm de
+# graça no MESMO payload de `jogos_time`), escanteios/cartões pedem 1 request
+# a mais em `/event/{id}/statistics` POR JOGO. Enriquecer os 15 de
+# `_historico_time` inteiros custaria 15 requests só pra UMA perna — este
+# teto é o que mantém o custo perto do que `_forma_recente`/`_freq_conjunta`
+# já pagavam antes desta extensão (não medido ainda contra produção; ajustar
+# se o custo por lote passar a incomodar, mesmo espírito do "+7s no lote
+# inteiro" já medido pra `STATS_SOFASCORE_ATIVO`).
+N_JOGOS_ESTATISTICAS_EXTRA = 8
+
+# TTL longo de propósito, ao contrário de `TTL_EVENTO_HORAS` (0.25h): aqui os
+# jogos já vieram filtrados por `_jogo_valido` (`status == "finished"`), e
+# estatística de jogo ENCERRADO não muda mais — cachear curto só geraria
+# request repetida pro mesmo histórico em ciclos seguidos.
+TTL_ESTATISTICA_HISTORICA_HORAS = 24.0 * 30
+
+
+def _enriquecer_estatisticas_extra(cliente: SofaScoreClient,
+                                   jogos: list[JogoHistorico]) -> None:
+    """Preenche `escanteios_pro/contra` e `cartoes_pro/contra` dos primeiros
+    `N_JOGOS_ESTATISTICAS_EXTRA` jogos da lista, em memória (muta os objetos).
+
+    Jogo sem `event_id`, ou cujo request falhe, ou cuja estatística não venha
+    reportada, fica com os campos em `None` — "recusa em vez de inventar",
+    mesmo princípio do resto do módulo. Cartão vermelho ausente é tratado como
+    ZERO aqui (diferente de `liquidacao.Intervalo`, que trata ausência como
+    desconhecido): lá é liquidação de dinheiro real, um "red" errado custa
+    caro; aqui é um sinal auxiliar que já exige >=2 sinais concordando pra
+    pesar (`curadoria._julgar`) e roda em modo sombra — o custo de errar por
+    causa de um vermelho não-reportado é muito menor que o custo de nunca ter
+    dado nenhum vermelho na amostra inteira.
+    """
+    from .liquidacao import _parse_estatisticas  # ver nota de ciclo acima
+
+    for jogo in jogos[:N_JOGOS_ESTATISTICAS_EXTRA]:
+        if jogo.event_id is None or jogo._eh_casa is None:
+            continue
+        try:
+            payload = cliente.estatisticas(jogo.event_id)
+        except SofaScoreError as exc:
+            log.info("sofascore: estatística extra falhou pro jogo %s: %s",
+                     jogo.event_id, exc)
+            continue
+        bloco = _parse_estatisticas(payload).get("ALL", {})
+
+        esc = bloco.get("escanteios")
+        if esc is not None:
+            casa, fora = esc
+            jogo.escanteios_pro, jogo.escanteios_contra = (
+                (int(casa.minimo), int(fora.minimo)) if jogo._eh_casa
+                else (int(fora.minimo), int(casa.minimo)))
+
+        am = bloco.get("cartoes_amarelos")
+        if am is not None:
+            casa_am, fora_am = am
+            ve = bloco.get("cartoes_vermelhos")
+            casa_ve = ve[0].minimo if ve is not None else 0.0
+            fora_ve = ve[1].minimo if ve is not None else 0.0
+            casa_tot, fora_tot = casa_am.minimo + casa_ve, fora_am.minimo + fora_ve
+            jogo.cartoes_pro, jogo.cartoes_contra = (
+                (int(casa_tot), int(fora_tot)) if jogo._eh_casa
+                else (int(fora_tot), int(casa_tot)))
 
 
 # ------------------------------------------------------------------
@@ -405,6 +510,19 @@ _MARCA_AMBOS_TEMPOS = re.compile(
     r"^(?P<time>.+?)\s+(?:marcar\s+em\s+ambos\s+os\s+tempos"
     r"|para\s+ganhar\s+um\s+dos\s+tempos)\s*$", re.IGNORECASE)
 
+# Cartão nunca tem `market_key` — `market_parser.SEM_COBERTURA` marca a
+# família inteira como não-suportada de propósito (a Pinnacle não publica
+# cartão em NENHUM special, conferido na API — ver cabeçalho de
+# `market_parser.py`), então `leg.market_key` é sempre `None` aqui. Mesma
+# regex que `liquidacao._RE_CARTOES_TOTAL` usa pra liquidar — só o "total do
+# jogo" (não 1x2, não por time: essas variantes também ficam de fora da
+# liquidação hoje, então cobrir só aqui seria inventar mais do que o resto do
+# projeto já validou).
+_CARTOES_TOTAL = re.compile(
+    r"^(?:total\s+de\s+)?cart(?:õ|o)es\s*:?\s*"
+    r"(?P<lado>mais|menos|over|under)\s+de\s+(?P<linha>\d+(?:[.,]\d+)?)\s*$",
+    re.IGNORECASE)
+
 
 @dataclass
 class _Predicado:
@@ -414,6 +532,10 @@ class _Predicado:
 
     time_interesse: int | None   # sofascore team id, ou None se indiferente
     avaliar: Callable[["JogoHistorico"], bool | None]
+    # True pra escanteios/cartões: só esses exigem o enriquecimento extra
+    # (`_enriquecer_estatisticas_extra`) antes de `avaliar` fazer sentido —
+    # gols/HT já vêm prontos em `_historico_time`.
+    precisa_estatisticas: bool = False
 
 
 def _valores(jogo: JogoHistorico, primeiro_tempo: bool) -> tuple[int, int] | None:
@@ -453,6 +575,20 @@ def _predicado_da_perna(leg: Leg, cand: _CandidatoEvento) -> tuple[_Predicado | 
             return jogo.ht_pro > 0 and (jogo.gols_pro - jogo.ht_pro) > 0
 
         return _Predicado(time_interesse=tid, avaliar=_pred), None
+
+    m = _CARTOES_TOTAL.match(texto)
+    if m:
+        linha = float(m.group("linha").replace(",", "."))
+        selecao = "over" if m.group("lado").lower() in ("mais", "over") else "under"
+
+        def _pred(jogo: JogoHistorico) -> bool | None:
+            if jogo.cartoes_pro is None or jogo.cartoes_contra is None:
+                return None
+            total = jogo.cartoes_pro + jogo.cartoes_contra
+            return total > linha if selecao == "over" else total < linha
+
+        return _Predicado(time_interesse=None, avaliar=_pred,
+                          precisa_estatisticas=True), None
 
     if not leg.suportado or not leg.market_key:
         return None, leg.motivo or "perna sem mercado reconhecido"
@@ -559,13 +695,66 @@ def _predicado_da_perna(leg: Leg, cand: _CandidatoEvento) -> tuple[_Predicado | 
             return None if v is None else (v[0] + v[1]) == alvo
         return _Predicado(time_interesse=None, avaliar=_pred), None
 
-    # correct_score, ht_ft, double_chance, corners*, spread, player props,
-    # tênis, basquete: fora do escopo desta primeira versão (ver docstring do
+    # Escanteios: diferente de gol, `market_key` só existe pra jogo INTEIRO
+    # (nunca "_1t" — `market_parser._parse_escanteios` não produz sufixo de
+    # 1º tempo pra escanteio), então `primeiro_tempo` sempre `False` aqui.
+    if base == "corners":
+        m_linha = re.search(r":(\d+(?:\.\d+)?)$", leg.market_key)
+        if not m_linha or leg.selecao not in ("over", "under"):
+            return None, "total de escanteios sem linha reconhecível"
+        linha = float(m_linha.group(1))
+
+        def _pred(jogo: JogoHistorico) -> bool | None:
+            if jogo.escanteios_pro is None or jogo.escanteios_contra is None:
+                return None
+            total = jogo.escanteios_pro + jogo.escanteios_contra
+            return total > linha if leg.selecao == "over" else total < linha
+        return _Predicado(time_interesse=None, avaliar=_pred,
+                          precisa_estatisticas=True), None
+
+    if base == "corners_team_total":
+        m_linha = re.search(r":(\d+(?:\.\d+)?)$", leg.market_key)
+        if not m_linha or leg.selecao not in ("over", "under") or not leg.time_nome:
+            return None, "total de escanteios de equipe sem linha/time reconhecível"
+        linha = float(m_linha.group(1))
+        tid = _resolver_time(leg.time_nome, cand.home_nome, cand.away_nome,
+                            cand.home_id, cand.away_id)
+        if tid is None:
+            return None, "total de escanteios de equipe: time não casou com o evento"
+
+        def _pred(jogo: JogoHistorico) -> bool | None:
+            if jogo.escanteios_pro is None:
+                return None
+            return jogo.escanteios_pro > linha if leg.selecao == "over" else jogo.escanteios_pro < linha
+        return _Predicado(time_interesse=tid, avaliar=_pred,
+                          precisa_estatisticas=True), None
+
+    if base == "corners_h2h":
+        if leg.selecao in ("home", "away"):
+            tid = cand.home_id if leg.selecao == "home" else cand.away_id
+        elif leg.time_nome:
+            tid = _resolver_time(leg.time_nome, cand.home_nome, cand.away_nome,
+                                cand.home_id, cand.away_id)
+        else:
+            tid = None
+        if tid is None:
+            return None, "1x2 de escanteios: time não casou com o evento"
+
+        def _pred(jogo: JogoHistorico) -> bool | None:
+            if jogo.escanteios_pro is None or jogo.escanteios_contra is None:
+                return None
+            return jogo.escanteios_pro > jogo.escanteios_contra
+        return _Predicado(time_interesse=tid, avaliar=_pred,
+                          precisa_estatisticas=True), None
+
+    # correct_score, ht_ft, double_chance, spread, player props, tênis,
+    # basquete: fora do escopo desta primeira versão (ver docstring do
     # módulo). `correct_score`/`ht_ft`/`double_chance` carregam token
     # "{home}"/"{away}" não resolvido — resolver exigiria duplicar
     # `_token_1x2`/`ALTERNATIVAS` de `market_parser`, e o risco de discordar
     # sutilmente do parser oficial é maior que o valor de cobrir mais 3 chaves
-    # agora.
+    # agora. Cartão/chute a gol/artilheiro de jogador continuam fora — nenhum
+    # dos sinais aqui olha pra jogador específico nenhum.
     return None, f"fora do escopo de placar (market_key={leg.market_key!r})"
 
 
@@ -648,6 +837,11 @@ def _freq_conjunta(cliente: SofaScoreClient, mercado_pernas: list[str],
                "diverge_da_estimativa_independente": None,
                "_motivo": f"histórico insuficiente ({len(jogos)} jogos)"}
 
+    # Só paga o custo extra (1 request/jogo) quando alguma perna do combo é
+    # de escanteio/cartão — gol/HT nunca precisa disto.
+    if any(p.precisa_estatisticas for p in predicados):
+        _enriquecer_estatisticas_extra(cliente, jogos)
+
     # Uma linha por jogo, uma coluna por perna — cada jogo avaliado só UMA vez
     # por predicado. Jogo com qualquer perna não-avaliável (ex.: faltou HT)
     # sai da amostra inteira: a marginal de cada perna usa exatamente a MESMA
@@ -682,6 +876,89 @@ def _freq_conjunta(cliente: SofaScoreClient, mercado_pernas: list[str],
         "_freq_estimativa_independente": round(prod_independente, 4),
         "_n_jogos_amostra": usaveis,
     }
+
+
+# ------------------------------------------------------------------
+# forma recente / momento
+# ------------------------------------------------------------------
+
+# Quantos jogos mais recentes contam como "agora", contra a base mais longa
+# (até 15, `_historico_time`). Mesma ordem de grandeza de N_JOGOS_MINIMO
+# porque abaixo disso a taxa recente é ruído puro (3 jogos: 1 resultado já
+# move 33 pontos percentuais).
+N_JOGOS_FORMA_RECENTE = 5
+
+# Diferença mínima (taxa base − taxa recente) pra acender o sinal, mesma
+# escala 0-1 de LIMIAR_DIVERGENCIA. Chute razoável, não medido contra
+# histórico de alertas real — mesmo status de LIMIAR_DIVERGENCIA.
+LIMIAR_FORMA_DIVERGENCIA = 0.15
+
+
+def _forma_recente(cliente: SofaScoreClient, mercado_pernas: list[str],
+                   cand: _CandidatoEvento) -> dict:
+    """Momento recente: a MESMA pergunta que cada perna faz (seu próprio
+    predicado, via `_predicado_da_perna`) vinha se confirmando com que
+    frequência nos últimos `N_JOGOS_FORMA_RECENTE` jogos do time relevante,
+    comparado à taxa de base no histórico mais longo (até 15 jogos,
+    `_historico_time`)?
+
+    Reusa o MESMO predicado que decide se a perna é value (não um "forma do
+    time" genérico à parte) — então o sinal não depende de adivinhar se
+    vitória/gol favorece ou atrapalha esta aposta especificamente: se a
+    perna pergunta "Fulano marca no 1º tempo", a taxa recente/base é sobre
+    ISSO, não sobre vitória geral do time.
+
+    Só acende (`forma_desfavoravel=True`) quando a taxa recente está
+    visivelmente ABAIXO da base — nunca quando está acima: um aquecimento
+    recente não é motivo pra confiar MAIS na aposta, mesmo princípio de
+    `flag_noticia_fresca`/`diverge_da_estimativa_independente` (a camada só
+    empurra confiança pra baixo, nunca pra cima).
+
+    Ao contrário de `_freq_conjunta`, funciona perna a perna — cada uma usa
+    o histórico do SEU time resolvido, sem exigir que todas apontem pro
+    mesmo time. Por isso serve tanto pra combo quanto pra mercado SIMPLES
+    (uma perna só). Perna sem time específico resolvido (BTTS, total do jogo
+    inteiro) não participa — "forma de um time" não faz sentido pra ela.
+
+    `forma_desfavoravel=None` quando nenhuma perna tem time+histórico
+    suficiente pra avaliar — recusa, não inventa.
+    """
+    legs = [parse_leg(texto) for texto in mercado_pernas]
+    piores: list[str] = []
+    avaliou_alguma = False
+
+    for leg in legs:
+        pred, _motivo = _predicado_da_perna(leg, cand)
+        if pred is None or pred.time_interesse is None:
+            continue
+
+        try:
+            jogos = _historico_time(cliente, pred.time_interesse)
+        except SofaScoreError as exc:
+            log.warning("sofascore: histórico (forma) falhou pro time %s: %s",
+                       pred.time_interesse, exc)
+            continue
+
+        if pred.precisa_estatisticas:
+            _enriquecer_estatisticas_extra(cliente, jogos)
+
+        avaliados = [r for r in (pred.avaliar(j) for j in jogos) if r is not None]
+        if len(avaliados) < max(N_JOGOS_MINIMO, N_JOGOS_FORMA_RECENTE):
+            continue
+
+        recentes = avaliados[:N_JOGOS_FORMA_RECENTE]
+        taxa_base = sum(avaliados) / len(avaliados)
+        taxa_recente = sum(recentes) / len(recentes)
+        avaliou_alguma = True
+
+        if taxa_base - taxa_recente >= LIMIAR_FORMA_DIVERGENCIA:
+            piores.append(f"{leg.texto}: {taxa_recente:.0%} recente vs "
+                          f"{taxa_base:.0%} base ({len(avaliados)} jogos)")
+
+    if not avaliou_alguma:
+        return {"forma_desfavoravel": None,
+               "_motivo_forma": "nenhuma perna com time/histórico suficiente"}
+    return {"forma_desfavoravel": bool(piores), "_forma_detalhe": piores}
 
 
 # ------------------------------------------------------------------
@@ -776,6 +1053,7 @@ def checar_stats(evento: dict, mercado_pernas: list[str], *,
         "diverge_da_estimativa_independente": None,
         "desfalque_recente": None,
         "flag_noticia_fresca": None,
+        "forma_desfavoravel": None,
     }
 
     nome_evento = evento.get("evento", "")
@@ -811,6 +1089,11 @@ def checar_stats(evento: dict, mercado_pernas: list[str], *,
                                             cand.home_nome, cand.away_nome))
         except Exception as exc:
             log.warning("sofascore: notícia fresca falhou pra %r: %s", nome_evento, exc)
+
+        try:
+            resultado.update(_forma_recente(cli, mercado_pernas, cand))
+        except Exception as exc:
+            log.warning("sofascore: forma recente falhou pra %r: %s", nome_evento, exc)
 
         # campos de diagnóstico (prefixo "_") não fazem parte do contrato
         # documentado, mas ajudam quem lê o log a entender o número.

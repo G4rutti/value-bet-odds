@@ -93,6 +93,16 @@ class Alertador:
             if r.get("offer_id") and r.get("content_hash"):
                 self.storage.registrar_avaliacao(
                     r["offer_id"], r["content_hash"], r.get("status"))
+                # Grava o veredito da curadoria estruturada AQUI, não só na
+                # hora de alertar: em modo sombra (CURADORIA_ENFORCE=0) a
+                # oferta segue seu caminho normal e pode nem virar alerta —
+                # mas é justo essa amostra (vetado/degrau que FOI enviado
+                # mesmo assim) que `query.py --curadoria` precisa pra
+                # comparar contra `liquidacoes` e decidir se o veto presta.
+                veredito = r.get("veredito_curadoria")
+                if veredito is not None:
+                    self.storage.registrar_veredito_curadoria(
+                        r["offer_id"], r["content_hash"], veredito)
 
         return await self._consolidar(resultados, len(lote))
 

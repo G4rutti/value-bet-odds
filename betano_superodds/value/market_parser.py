@@ -70,7 +70,17 @@ SEM_COBERTURA: tuple[tuple[str, str], ...] = (
     # "Primeiro gol: Náutico" / "1º tempo - primeiro gol: Racing Club"
     # (EstrelaBet) e "Ultimo a marcar: Botafogo-SP" — mesmas duas famílias
     # ("primeiro a marcar" e sequência de gols), grafias que faltavam.
-    (r"primeiro\s+a\s+marcar|primeiro\s+gol\s*:",
+    # ⚠️ A variante sem ":" (`primeiro\s+gol\b` puro) só entrou depois de
+    # duas guardas: "e 1x2" (combinado real do pool, 2.940 linhas, excluído
+    # em `COMBINADOS` ANTES deste regex ser consultado) e "será" (mercado
+    # DIFERENTE — "Primeiro gol será marcado em qual dos tempos", sobre
+    # QUANDO, não QUEM). Sem as duas, a grafia do pool ("Primeiro gol
+    # <Time>", sem ":") nunca teria casado, mas relaxar sem elas vazaria
+    # mercado errado pro consenso — mesmo risco de "mercado restrito casado
+    # com referência ampla" que já custou o falso +141,8% do Mirassol,
+    # aqui na variante "mercado errado casado como se fosse o certo".
+    (r"primeiro\s+a\s+marcar|primeiro\s+gol\s*:"
+     r"|primeiro\s+gol\b(?!\s+ser[áa]\b)",
      "primeiro a marcar (sem equivalente na Pinnacle)"),
     # A ordem das palavras varia por casa: "duplas faltas" (Betano) e "faltas
     # duplas"/"total faltas duplas" (Novibet) são o mesmo mercado.
@@ -96,6 +106,28 @@ SEM_COBERTURA: tuple[tuple[str, str], ...] = (
      "probabilidade conjunta entre tempos (sem equivalente na Pinnacle)"),
     # Tênis: só o que realmente não existe na Pinnacle.
     (r"tie\s*breaks?", "tie-break"),
+    # "Alexander Zverev total jogos: Mais de 12.5" — total de GAMES de um
+    # JOGADOR na partida (a Pinnacle publica `games_total` do JOGO, não por
+    # jogador). O lookbehind (letra+espaço logo antes de "total jogos") é o
+    # que distingue nome de jogador das 3 grafias que são o mercado do JOGO
+    # (já coberto por `_parse_tenis`, tem que continuar `suportado=True`):
+    # "Total jogos" puro (nada antes), "Primeiro/Segundo/Terceiro set -
+    # total jogos" (hífen antes, não letra) e "N total jogos" (dígito antes).
+    # ⚠️ O match precisa abranger só "total jogos" — span PEQUENO de
+    # propósito, senão `antes`/`depois` (usados por `chave_consenso` pra
+    # achar o nome do jogador) saem vazios: uma versão anterior deste regex
+    # usava `.+` antes de "total jogos", que consumia o nome inteiro dentro
+    # do próprio match e zerava `antes`, produzindo `jogador:` vazio e todo
+    # mundo caindo no escopo genérico "jogo" — mesma classe de bug (jogadores
+    # diferentes colidindo na mesma chave) que o artilheiro já tem e não foi
+    # mexido aqui.
+    #
+    # Mesmo `motivo` que `_parse_tenis` já usa mais abaixo pra esta mesma
+    # grafia — este regex só faz o `_sem_cobertura` reconhecer ANTES, o que
+    # também habilita `chave_consenso` (que só enxerga motivo via esta
+    # tabela, nunca o `Leg.motivo` calculado por outro parser).
+    (r"(?<=[a-zà-ÿ]\s)total\s+jogos\b(?=.*(?:mais|menos)\s+de)",
+     "total de games do jogador não coberto pela Pinnacle"),
     (r"resultado\s+ap(ó|o)s\s+\d+\s+games?", "resultado após N games"),
     (r"resultado\s+no\s+set", "placar exato de set"),
     # Basquete: cestinha do jogo não é publicado.
@@ -124,7 +156,11 @@ SEM_COBERTURA: tuple[tuple[str, str], ...] = (
      "placar em algum momento (não é o placar final)"),
     # "Yulia Putintseva ganhar exatamente 1 Set: Sim" — número exato de sets
     # de um lado. A Pinnacle publica `sets_h2h`/handicap de sets, não o exato.
-    (r"ganhar\s+exatamente\s+\d+\s+set", "sets exatos de um jogador"),
+    # ⚠️ "ganhar" sozinho perdia a maioria: medido no banco (sondagem
+    # 2026-08-19), a grafia real usa majoritariamente "vencer" — "ganhar"
+    # puro achava 1 perna, "(ganhar|vencer)" acha 49. Cobertura de pool: 65
+    # eventos, 50 com >= CONSENSO_MIN_CASAS_PROP casas.
+    (r"(ganhar|vencer)\s+exatamente\s+\d+\s+set", "sets exatos de um jogador"),
 
     # --- bet-builder da Altenar: a perna perdeu o nome do mercado ------------
     # No `GetEventDetails` o `marketId` das pernas de bet-builder não vem no
@@ -187,7 +223,95 @@ _FAMILIA_POR_MOTIVO: dict[str, str] = {
     # mas a chave já fica pronta.
     "defesas do goleiro": "defesas_goleiro",
     "impedimentos": "impedimentos",
+    # Sondado em 2026-08-19 contra o banco (`sondar_familias_consenso.py`):
+    # 65 eventos no pool, 50 com >= CONSENSO_MIN_CASAS_PROP casas — só
+    # precisou ampliar "ganhar" -> "(ganhar|vencer)" em SEM_COBERTURA acima
+    # pra sair de 1 perna de oferta pra 49.
+    "sets exatos de um jogador": "sets_exatos_jogador",
+    # Sondado em 2026-08-19: 85 eventos no pool, 62 com >= CONSENSO_MIN_CASAS
+    # e 59 com >= CONSENSO_MIN_CASAS_PROP casas. ⚠️ Este motivo tem QUATRO
+    # grafias reais distintas por trás do mesmo texto ("marcar em ambos os
+    # tempos" / "vencer de zero" / "vencer um dos tempos" / "vencer ambos os
+    # tempos" — confirmado com uma varredura direta no pool, não só nos
+    # exemplos da sondagem) — correto pro lado da OFERTA (a mensagem "sem
+    # equivalente na Pinnacle" é igual pras quatro), mas SEM discriminador
+    # elas produziriam a MESMA ChaveConsenso (mesma família+escopo+lado) e
+    # colidiriam silenciosamente — "vence de zero: Sim" e "vence ambos os
+    # tempos: Sim" são probabilidades bem diferentes. Ver
+    # `_sub_variante_prob_conjunta`, que usa `linha` como marcador sintético
+    # da sub-variante (não é uma linha de aposta de verdade, é só a
+    # distinção que falta no dataclass).
+    "probabilidade conjunta entre tempos (sem equivalente na Pinnacle)": "prob_conjunta_tempos",
+    # Sondado em 2026-08-19: 172 eventos no pool, 80 com >= CONSENSO_MIN_CASAS
+    # casas — maior cobertura potencial dos motivos sem família, mas também
+    # o único que precisou de extensão estrutural: ver `_chave_primeiro_a_
+    # marcar` (lado categórico, não over/under/sim-não) e a guarda "e 1x2" em
+    # `COMBINADOS` (mercado combinado que teria vazado se a guarda viesse
+    # depois de relaxar o regex).
+    "primeiro a marcar (sem equivalente na Pinnacle)": "primeiro_a_marcar",
+    # Sondado em 2026-08-19: 24 eventos no pool (isolando as grafias de
+    # JOGADOR — "Total jogos"/"Primeiro set - total jogos"/"N total jogos"
+    # são o mercado do JOGO ou do SET, já cobertos por `_parse_tenis`, e
+    # ficam de fora), 16-18 com >= CONSENSO_MIN_CASAS(_PROP) casas.
+    "total de games do jogador não coberto pela Pinnacle": "total_jogos_jogador",
 }
+
+
+# Marcador sintético de sub-variante pra `prob_conjunta_tempos` — ver o
+# comentário em `_FAMILIA_POR_MOTIVO` sobre por que as quatro grafias reais
+# não podem compartilhar a mesma `ChaveConsenso`. Nunca é uma linha de aposta
+# de verdade; é só o jeito de usar o campo `linha` (já existente no
+# dataclass) pra separar sub-variantes sem inventar um campo novo.
+_SUB_VARIANTE_MARCAR_AMBOS = re.compile(
+    r"marcar\s+em\s+ambos\s+(os\s+)?tempos", re.IGNORECASE)
+_SUB_VARIANTE_VENCER_DE_ZERO = re.compile(r"vencer\s+de\s+zero", re.IGNORECASE)
+_SUB_VARIANTE_VENCER_AMBOS = re.compile(
+    r"(vencer|ganhar)\s+ambos\s+(os\s+|dos\s+)?tempos", re.IGNORECASE)
+_SUB_VARIANTE_VENCER_UM = re.compile(
+    r"(vencer|ganhar)\s+um\s+(os\s+|dos\s+)?tempos", re.IGNORECASE)
+
+
+def _sub_variante_prob_conjunta(corpo: str) -> float | None:
+    if _SUB_VARIANTE_MARCAR_AMBOS.search(corpo):
+        return 3.0
+    if _SUB_VARIANTE_VENCER_DE_ZERO.search(corpo):
+        return 0.0
+    if _SUB_VARIANTE_VENCER_AMBOS.search(corpo):
+        return 2.0
+    if _SUB_VARIANTE_VENCER_UM.search(corpo):
+        return 1.0
+    return None
+
+
+# "Primeiro gol: Nenhum" (não sai gol nenhum, ou o jogo termina 0-0 antes de
+# qualquer time abrir o placar) — visto no pool, nunca visto na oferta até
+# agora, mas tratado igual a um time: é um desfecho categórico como outro
+# qualquer, só com o nome fixo em vez de normalizado por `matcher.normalizar`
+# (que existe pra nome de TIME de verdade; "nenhum" não é time).
+_NENHUM_PRIMEIRO_GOL = re.compile(r"^nenhum$|^sem\s+golos?$|^no\s+goal$", re.IGNORECASE)
+
+
+def _chave_primeiro_a_marcar(periodo: str, corpo: str,
+                             m_familia: re.Match | None) -> ChaveConsenso | None:
+    """"Primeiro gol: <Time>" (oferta) / "Primeiro gol <Time>" (pool, sem
+    ":") — quem faz o primeiro gol é o DESFECHO (`lado`), não uma entidade
+    que restringe o mercado. Por isso não passa pela extração genérica de
+    escopo em `chave_consenso`: aqui o texto depois da palavra do mercado É
+    o lado, sempre no escopo do jogo/período inteiro.
+    """
+    if m_familia is None:
+        return None
+    depois = corpo[m_familia.end():].strip().lstrip(":").strip()
+    if not depois:
+        return None
+    if _NENHUM_PRIMEIRO_GOL.match(depois):
+        lado = "nenhum"
+    else:
+        lado = normalizar(depois)
+    if not lado:
+        return None
+    return ChaveConsenso(familia="primeiro_a_marcar", escopo=periodo,
+                         lado=lado, linha=None)
 
 
 # --- mercados COMBINADOS num rótulo só ------------------------------------
@@ -208,6 +332,12 @@ COMBINADOS = re.compile(
     r"|\be\s+handicap"
     r"|\be\s+placar"
     r"|\be\s+escanteios"
+    # "Primeiro gol e 1x2" — combinado real do pool (2.940 linhas), precisou
+    # entrar ANTES de relaxar o regex de "primeiro gol" pra casar a grafia
+    # do pool sem ":" (ver `_chave_primeiro_a_marcar`) — senão o combinado
+    # vazaria pro consenso como se fosse a família simples, o mesmo erro de
+    # classe do falso +141,8% do Mirassol.
+    r"|\be\s+1x2\b"
     r"|chance\s+dupla\s+e\b"
     r"|resultado\s+e\b"
     r"|\bmulti\s?gols?\b",
@@ -462,6 +592,18 @@ def chave_consenso(texto: str) -> ChaveConsenso | None:
         if m_familia:
             break
 
+    if familia == "primeiro_a_marcar":
+        # Família à parte, não passa pelo bloco genérico abaixo: aqui quem
+        # vem depois da palavra do mercado é o DESFECHO (lado — qual time fez
+        # o primeiro gol), não uma entidade que restringe o escopo
+        # (`jogador:`/`time:` como nas outras famílias). Não existe versão
+        # "por jogador" nem "por time" deste mercado, só "por jogo" — tratar
+        # o nome como escopo aqui produziria `jogo`/`time:<nome time A>`
+        # comparado contra `jogo`/`time:<nome time B>` do mesmo evento, ambos
+        # SEM lado (recusados na guarda de `lado is None` mais abaixo) em vez
+        # do resultado certo: um `lado` por time, mesmo escopo `jogo`.
+        return _chave_primeiro_a_marcar(periodo, corpo, m_familia)
+
     escopo = periodo
     if m_familia:
         # `consenso._normalizar` (não `matcher.normalizar`) pra nome de
@@ -474,7 +616,14 @@ def chave_consenso(texto: str) -> ChaveConsenso | None:
         from .consenso import _normalizar as _normalizar_rotulo
 
         antes = corpo[: m_familia.start()].strip()
-        antes = re.sub(r"\b(de|do|da)\s*$", "", antes, flags=re.IGNORECASE).strip()
+        # "para" entra aqui igual a "de/do/da": "Brandon Nakashime para
+        # vencer exatamente 1 set" (sets exatos) e "<Time> para vencer de
+        # zero"/"para vencer ambos os tempos" (probabilidade conjunta) usam
+        # essa preposição antes da palavra do mercado. Sem descolar, o nome
+        # normalizado ficava com "para" grudado ("jogador:brandon nakashime
+        # para"), e a chave nunca casava com a grafia do pool (que não tem o
+        # "para" sobrando do mesmo jeito).
+        antes = re.sub(r"\b(de|do|da|para)\s*$", "", antes, flags=re.IGNORECASE).strip()
         depois = corpo[m_familia.end():].strip()
 
         # "Al Ettifaq FC total cartões" / "Total (2.5) Chutes Ponte Preta": o
@@ -549,6 +698,18 @@ def chave_consenso(texto: str) -> ChaveConsenso | None:
                 valor = None
             else:
                 lado, valor = None, None
+
+    if familia == "prob_conjunta_tempos" and lado is not None:
+        # Sobrescreve `valor` com o marcador sintético de sub-variante — ver
+        # `_sub_variante_prob_conjunta`. Sem isto as quatro grafias reais
+        # ("marcar em ambos os tempos" / "vencer de zero" / "vencer um dos
+        # tempos" / "vencer ambos os tempos") colidiriam na mesma chave.
+        valor = _sub_variante_prob_conjunta(corpo)
+        if valor is None:
+            # Grafia nova, ainda não catalogada — recusar é mais seguro que
+            # deixar cair numa das quatro por acidente (`re.search` de uma
+            # das quatro bater sem ser a variante certa).
+            return None
 
     # Sem `lado` a chave não identifica um DESFECHO, só um mercado — e
     # `consenso._mercados_por_casa_canonico` escolhe a seleção pelo `lado`.

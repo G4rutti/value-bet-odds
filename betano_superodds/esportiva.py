@@ -245,6 +245,22 @@ class EsportivaScraper:
         # cobertura de consenso só vale pra oferta que existe.
         da_fila = self._eventos_da_fila(eventos)[: config.ALTENAR_DETALHES_FILA]
 
+        # `com_boost` não tinha teto próprio antes deste corte — numa casa com
+        # muitos boosts na listagem (visto ao vivo: EstrelaBet com 36 num
+        # ciclo só), ele sozinho já passa de `ALTENAR_MAX_DETALHES` e o slice
+        # final nunca alcança `da_fila`, mesmo ela tendo sido calculada. A
+        # reserva documentada acima ("fatiado de DENTRO do orçamento") virava
+        # promessa não cumprida nesse cenário. Corte CONDICIONAL — só morde
+        # quando há alvo de fila de verdade, e só o suficiente pra abrir
+        # espaço — pra não perder descoberta de oferta à toa nos ciclos (a
+        # maioria) sem alvo nenhum.
+        n_cortado = 0
+        if da_fila:
+            teto_com_boost = max(0, config.ALTENAR_MAX_DETALHES - len(da_fila))
+            if len(com_boost) > teto_com_boost:
+                n_cortado = len(com_boost) - teto_com_boost
+                com_boost = com_boost[:teto_com_boost]
+
         n_detalhes_pedidos = 0
         n_boosts_achados = 0
 
@@ -271,6 +287,10 @@ class EsportivaScraper:
                      self.casa.slug, ESPORTES.get(sport_id, sport_id),
                      n_mercados_turb, n_boosts_achados, n_detalhes_pedidos,
                      len(da_fila))
+        if n_cortado:
+            log.info("%s/%s: %d evento(s) com boost cortados do orçamento pra "
+                     "reservar %d vaga(s) da fila", self.casa.slug,
+                     ESPORTES.get(sport_id, sport_id), n_cortado, len(da_fila))
 
         return ofertas
 

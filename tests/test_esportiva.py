@@ -770,6 +770,37 @@ class TestSondaDirecionadaPelaFila(unittest.TestCase):
                  for i in range(10, 20)]
         self.assertEqual(len(self._sondados(listagem, alvos, teto=3, vagas=2)), 3)
 
+    def test_muitos_boosts_nao_engolem_a_reserva_da_fila(self):
+        """`com_boost` não tinha teto próprio antes do corte final — casa com
+        muitos boosts na listagem (visto ao vivo: EstrelaBet com 36 boosts
+        num único ciclo) engolia sozinha o orçamento inteiro, e a reserva de
+        `ALTENAR_DETALHES_FILA` nunca era alcançada mesmo tendo sido
+        calculada. Com teto=12/vagas=4, 20 eventos turbinados (bem acima do
+        teto) não podem impedir o alvo da fila de entrar."""
+        turbinados = list(range(100, 120))   # 20, bem acima do teto de 12
+        listagem = self._listagem(
+            [(i, f"A{i} vs. B{i}", 5) for i in turbinados]
+            + [(30, "Norwich vs. West Bromwich", 3)],
+            turbinados=turbinados,
+        )
+        pedidos = self._sondados(
+            listagem,
+            [{"evento": "Norwich - West Bromwich", "inicio_evento": daqui(3)}],
+            teto=12, vagas=4)
+        self.assertIn(30, pedidos)
+        self.assertEqual(len(pedidos), 12, "o teto total continua valendo")
+
+    def test_sem_alvo_de_fila_boost_continua_sem_teto_proprio(self):
+        """O corte é CONDICIONAL: em ciclo sem alvo de fila casável, `com_boost`
+        não perde nenhum espaço — não vale desperdiçar descoberta de oferta
+        num cenário que é a maioria dos ciclos."""
+        turbinados = list(range(100, 115))   # 15, acima do teto de 12
+        listagem = self._listagem(
+            [(i, f"A{i} vs. B{i}", 5) for i in turbinados], turbinados=turbinados)
+        pedidos = self._sondados(listagem, [], teto=12, vagas=4)
+        self.assertEqual(len(pedidos), 12)
+        self.assertTrue(all(p in turbinados for p in pedidos))
+
     def test_evento_da_fila_nao_paga_detalhe_duas_vezes(self):
         """Um evento pode estar em `com_boost` E na fila; sem dedup ele
         consumiria duas vagas do mesmo orçamento."""

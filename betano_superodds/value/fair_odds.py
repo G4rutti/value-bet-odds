@@ -27,9 +27,17 @@ from typing import TYPE_CHECKING
 
 from rapidfuzz import fuzz
 
+# ProbJusta, remover_vig, SOMA_ESPERADA, MARGEM_MIN/MAX e _lado_do_time
+# migraram pro pacote compartilhado `odds_service` (Projetos-pessoais/
+# odds-service) — ver `.matcher`/`.models`, que são shims sobre o pacote.
+# Reimportados aqui (não só usados) porque `consenso.py:52` faz
+# `from .fair_odds import ProbJusta, remover_vig` — quebrar esse import
+# quebraria o consenso.
+from odds_service.devig import MARGEM_MAX, MARGEM_MIN, ProbJusta, SOMA_ESPERADA, remover_vig
+
 from . import config
 from .market_parser import ALTERNATIVAS, Leg
-from .matcher import normalizar
+from .matcher import _lado_do_time, normalizar
 from .models import Market, Matchup
 from .modelo_gols import MAX_GOLS, ModeloGols, matriz_placares, modelo_do_jogo
 
@@ -39,11 +47,6 @@ if TYPE_CHECKING:
     from .consenso import ProvedorConsenso
 
 log = logging.getLogger(__name__)
-
-# Margem plausível pra um mercado. Fora disso a linha está corrompida ou é
-# suspensa — melhor descartar do que calcular edge em cima de lixo.
-MARGEM_MIN = -0.01
-MARGEM_MAX = 0.35
 
 
 def _trace_ativo() -> bool:
@@ -84,23 +87,6 @@ def _trace_perna(leg: "Leg", chave: str, market: "Market | None",
 
 
 @dataclass
-class ProbJusta:
-    """Probabilidade já sem vig, de um lado específico."""
-
-    probabilidade: float
-    odd_justa: float
-    overround: float
-    mercado: str
-    interpolada: bool = False   # estimada entre duas linhas, não observada
-    derivada: bool = False      # veio do modelo de placar, não de preço nenhum
-    consenso: bool = False      # mediana de-vigada das casas, não da Pinnacle
-
-    @property
-    def margem_pct(self) -> float:
-        return round(self.overround * 100, 2)
-
-
-@dataclass
 class FairOddsResult:
     odd_justa: float | None
     tipo_mercado: str                    # "simples" | "combo"
@@ -134,56 +120,6 @@ class FairOddsResult:
     def por_consenso(self) -> bool:
         """Alguma perna foi precificada pelas casas, não pela Pinnacle."""
         return any(p.consenso for p in self.pernas)
-
-
-# Quanto as probabilidades verdadeiras de um mercado somam. Quase todo mercado
-# é uma partição do espaço amostral e soma 1 — mas a chance dupla não: cada um
-# dos três desfechos cobre DOIS dos três resultados, então a soma honesta é 2.
-# Normalizar pra 1 daria margem de ~109%, o mercado seria descartado como
-# corrompido e a chance dupla nunca teria referência.
-SOMA_ESPERADA: dict[str, float] = {
-    "double_chance": 2.0,
-    "double_chance_1t": 2.0,
-}
-
-
-def remover_vig(market: Market) -> dict[str, ProbJusta] | None:
-    """De-vig proporcional: normaliza as implícitas pra somarem o esperado."""
-    if not market.completo:
-        return None
-
-    esperado = SOMA_ESPERADA.get(market.key, 1.0)
-    implicitas = {nome: 1.0 / odd for nome, odd in market.outcomes.items()}
-    overround = sum(implicitas.values())
-    margem = overround / esperado - 1.0
-
-    if not (MARGEM_MIN <= margem <= MARGEM_MAX):
-        log.debug("margem implausível (%.4f) em %s — descartado", margem, market.key)
-        return None
-
-    saida: dict[str, ProbJusta] = {}
-    for nome, imp in implicitas.items():
-        prob = imp / overround * esperado
-        saida[nome] = ProbJusta(
-            probabilidade=prob,
-            odd_justa=round(1.0 / prob, 4),
-            overround=round(margem, 6),
-            mercado=market.label,
-        )
-    return saida
-
-
-def _lado_do_time(nome: str, matchup: Matchup) -> str | None:
-    """"Berrettini" / "Chicago Sky (F)" -> "home" ou "away"."""
-    if not nome:
-        return None
-    alvo = normalizar(nome)
-    s_casa = fuzz.token_sort_ratio(alvo, normalizar(matchup.home_team))
-    s_fora = fuzz.token_sort_ratio(alvo, normalizar(matchup.away_team))
-    if max(s_casa, s_fora) < 70:
-        log.debug("time/jogador %r não bate com %s", nome, matchup.display_name)
-        return None
-    return "home" if s_casa >= s_fora else "away"
 
 
 def _resolver_template(selecao: str, matchup: Matchup) -> list[str]:

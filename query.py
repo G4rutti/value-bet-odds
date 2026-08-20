@@ -7,6 +7,7 @@
     python query.py --min-ganho 15      # só boosts acima de 15%
     python query.py --historico         # últimas mudanças registradas
     python query.py --runs              # log dos ciclos de scraping
+    python query.py --curadoria         # veredito da curadoria x resultado real
 """
 
 from __future__ import annotations
@@ -118,6 +119,69 @@ def show_runs(conn: sqlite3.Connection, limit: int) -> None:
               f"{r['alteradas']:>5} {r['expiradas']:>5}  {r['erro'] or ''}")
 
 
+def show_curadoria(conn: sqlite3.Connection, limit: int) -> None:
+    """Compara o veredito da curadoria estruturada (`value/curadoria.py`)
+    contra o resultado REAL da liquidação — é o que decide quando promover
+    `CURADORIA_ENFORCE` de sombra pra valendo (ver `value/config.py`).
+
+    Junta por `offer_id`: uma linha por oferta que TEM veredito registrado
+    (gravado mesmo em modo sombra, mesmo pra oferta que não virou alerta —
+    ver `alerts.py`) E já foi liquidada green/red. `void`/`desconhecido`
+    ficam de fora: não são sinal de acerto nem de erro do veredito.
+    """
+    rows = list(conn.execute("""
+        SELECT v.decisao, v.motivo, v.modo, v.confianca_original,
+               l.resultado, l.fim_partida, o.evento, o.mercado
+          FROM veredito_curadoria v
+          JOIN liquidacoes l ON l.offer_id = v.offer_id
+          LEFT JOIN offers o ON o.offer_id = v.offer_id
+         WHERE l.resultado IN ('green', 'red')
+         ORDER BY l.fim_partida DESC
+    """))
+    if not rows:
+        print("nenhum veredito de curadoria liquidado ainda — precisa de "
+              "CURADORIA_ATIVA=1 rodando por um tempo e jogos já encerrados")
+        return
+
+    por_decisao: dict[str, dict[str, int]] = {}
+    for r in rows:
+        d = por_decisao.setdefault(r["decisao"], {"green": 0, "red": 0})
+        d[r["resultado"]] = d.get(r["resultado"], 0) + 1
+
+    print(f"{'DECISÃO':<10} {'N':>5} {'GREEN':>6} {'RED':>5} {'TAXA RED':>9}")
+    print("-" * 45)
+    for decisao in ("aprovado", "degrau", "vetado"):
+        d = por_decisao.get(decisao)
+        if not d:
+            continue
+        n = d["green"] + d["red"]
+        taxa = d["red"] / n * 100 if n else 0.0
+        print(f"{decisao:<10} {n:>5} {d['green']:>6} {d['red']:>5} {taxa:>8.1f}%")
+
+    aprovado = por_decisao.get("aprovado", {"green": 0, "red": 0})
+    vetado = por_decisao.get("vetado", {"green": 0, "red": 0})
+    n_aprovado = aprovado["green"] + aprovado["red"]
+    n_vetado = vetado["green"] + vetado["red"]
+    print()
+    if n_aprovado and n_vetado:
+        taxa_aprovado = aprovado["red"] / n_aprovado
+        taxa_vetado = vetado["red"] / n_vetado
+        print(f"red em 'vetado' ({taxa_vetado:.0%}, n={n_vetado}) vs "
+              f"'aprovado' ({taxa_aprovado:.0%}, n={n_aprovado})")
+        if n_vetado < 30 or n_aprovado < 30:
+            print("amostra pequena — critério proposto no plano é 30+ "
+                 "liquidados dos dois lados antes de considerar "
+                 "CURADORIA_ENFORCE=1 (ver value/config.py)")
+    else:
+        print("ainda sem amostra suficiente pra comparar 'vetado' vs 'aprovado'")
+
+    print(f"\núltimos {min(limit, len(rows))} vereditos liquidados:")
+    print("-" * 100)
+    for r in rows[:limit]:
+        print(f"[{r['resultado'].upper():5}] {r['decisao']:<9} modo={r['modo']:<7} "
+              f"{(r['evento'] or '?')[:40]:<40} {r['motivo'] or ''}")
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Consulta o banco de Super Odds")
     # Sem `choices`: com 10 casas na Altenar, a fonte é `<slug>_1x2`/`<slug>_boost`,
@@ -129,6 +193,8 @@ def main() -> int:
     p.add_argument("--todas", action="store_true", help="inclui ofertas já expiradas")
     p.add_argument("--historico", action="store_true", help="mostra o histórico de mudanças")
     p.add_argument("--runs", action="store_true", help="mostra o log de ciclos")
+    p.add_argument("--curadoria", action="store_true",
+                   help="veredito da curadoria (value/curadoria.py) x resultado real")
     p.add_argument("--limit", type=int, default=30, help="linhas em histórico/runs")
     args = p.parse_args()
 
@@ -146,6 +212,8 @@ def main() -> int:
             show_history(conn, args.limit)
         elif args.runs:
             show_runs(conn, args.limit)
+        elif args.curadoria:
+            show_curadoria(conn, args.limit)
         elif args.casas:
             show_casas(conn, args.todas)
         else:

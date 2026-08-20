@@ -247,6 +247,19 @@ ENABLE_SUPERBET = os.getenv("ENABLE_SUPERBET", "1") not in ("0", "false", "False
 # o que ela não sondar neste ciclo não é compensado por nenhuma irmã.
 SUPERBET_MAX_DETALHES = int(os.getenv("SUPERBET_MAX_DETALHES", "8"))
 
+# --- CasaDeAposta (livro de mercados): fonte de REFERÊNCIA, não de oferta --
+# Ver o cabeçalho de `casadeaposta_livro.py`. Endpoint diferente do CMS de
+# combos que `casadeaposta.py` já usa — flag própria pra poder desligar um
+# sem afetar o outro. É a 4ª família de feed do pool de consenso.
+ENABLE_CASADEAPOSTA_LIVRO = os.getenv("ENABLE_CASADEAPOSTA_LIVRO", "1") not in ("0", "false", "False")
+
+# Páginas por esporte por ciclo (`pageSize=50` fixo no scraper). Diferente da
+# Superbet, a listagem já traz o livro de mercados completo — não há request
+# de detalhe por evento, então o teto aqui é só sobre profundidade de
+# catálogo, não sobre custo por jogo. 6 páginas cobre o catálogo de futebol
+# observado na sondagem (2026-08-19: ~280 jogos em 72h de janela).
+CASADEAPOSTA_LIVRO_MAX_PAGINAS = int(os.getenv("CASADEAPOSTA_LIVRO_MAX_PAGINAS", "6"))
+
 # Até quantas horas à frente vale gastar request de detalhe.
 #
 # A janela de sondagem é cara (12 detalhes por casa, e a casa só volta a cada

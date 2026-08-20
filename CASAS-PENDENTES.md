@@ -241,6 +241,38 @@ Confirmado com `curl_cffi.Session`: `200`, JSON completo com odds e "SUPER
 ODDS". Endpoints irmãos descobertos no mesmo host: `/api/odds/bettable-sports`,
 `/api/odds/games-by-leagueid`, `/api/odds/game-periods`.
 
+**Atualização de 2026-08-19 — implementada como 4ª família do pool de
+consenso (`casadeaposta_livro.py`), NÃO como fonte de oferta.** Sondagem ao
+vivo revelou 3 coisas que a entrada acima não sabia:
+
+1. A lista de `marketTypeIds` acima (copiada de uma sessão anterior) estava
+   incompleta — sem ela filtrada, o mesmo endpoint devolve um catálogo bem
+   maior (até `openMarketCount`), incluindo escanteios e cartões. A
+   implementação atual **não filtra por `marketTypeIds`** de propósito.
+2. Sem esse filtro, ~450 dos 530 nomes de mercado distintos observados eram
+   "**<Nome do Jogador> para marcar (incl. prolongamento)**" — um mercado de
+   artilheiro por jogador por jogo, mais variantes tipo "Primeiro jogador a
+   receber cartão", "Último marcador", "<Time> 1st player to score" e o
+   catálogo `Jogador - *` (cartões/chutes, cada um com book de UM lado só ou
+   patamares cumulativos não-complementares — mesma armadilha que a Superbet
+   já documentou pro catálogo dela). `casadeaposta_livro.py` usa ALLOWLIST
+   de nome de mercado (`_MERCADOS_SEGUROS`), não denylist, restrita a
+   mercados de JOGO/TIME (1x2, Total, Dupla chance, Ambas Marcam, Escanteios
+   1x2/handicap/total, Handicap, Ímpar/Par, Vencedor). O catálogo de
+   artilheiro/cartão POR JOGADOR fica de fora — cobertura real, mas fica pra
+   quem for confirmar com segurança o formato do book de cada um antes de
+   ligar.
+3. `startDate` na listagem vem SEM sufixo de fuso e é **UTC** (confirmado
+   comparando kickoff de jogos do Brasileirão contra o horário real de bola
+   rolando) — `models.to_utc_iso` trataria isso como hora LOCAL se recebido
+   cru, por isso o scraper gruda `+00:00` antes de normalizar.
+
+A listagem já traz `markets[].odds[]` completos — diferente da Superbet, não
+precisa de request de detalhe por evento. `league`/nome de campeonato
+continua sem endpoint conhecido (`bettable-sports` devolve `[]`,
+`leagues`/`game-categories`/`tournaments` são 404) — `liga` fica `None` por
+enquanto, mesma degradação que a Superbet já tinha quando `/struct` falhava.
+
 ### EsportesDaSorte + OleyBet — mesma plataforma confirmada (SportingTech)
 
 A hipótese do levantamento original ("mesma estrutura de URL, provável mesma

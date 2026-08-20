@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -232,6 +233,29 @@ CREATE TABLE IF NOT EXISTS liquidacoes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_liquidacoes_fim ON liquidacoes(fim_partida);
+
+-- Funil de cobertura por ciclo, pra medir "consenso não formou"/"evento fora
+-- do pool"/etc. ao longo de VÁRIAS janelas em vez de um ciclo isolado. A fila
+-- de avaliação anda (avalia sempre os 60 mais perto do kickoff, um conjunto
+-- diferente por ciclo), então comparar a contagem de um ciclo contra outro é
+-- ruído puro — medido ao vivo em 2026-08-19, "consenso não formou" oscilou
+-- 6→14→17→17 em 4 ciclos seguidos sem NENHUMA mudança de código no meio.
+-- Agregando por `chave` numa janela de várias horas isola o efeito real de
+-- uma mudança do ruído da janela que anda.
+--
+-- Formato "tidy" (uma linha por `chave`, não uma coluna por motivo): mapeia
+-- 1:1 com os `Counter`s que `pipeline.avaliar_ofertas` já calcula
+-- (`statuses`/`classes`), e não exige migração de schema se aparecer uma
+-- `motivo_classe` nova.
+CREATE TABLE IF NOT EXISTS cobertura_funil (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    executado_em  TEXT NOT NULL,
+    dimensao      TEXT NOT NULL,   -- 'status' | 'motivo_classe'
+    chave         TEXT NOT NULL,   -- 'avaliada' | 'evento fora do pool' | ...
+    n             INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cobertura_funil_em ON cobertura_funil(executado_em);
 """
 
 
@@ -616,6 +640,23 @@ class Storage:
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (_now(), ofertas, novas, alteradas, expiradas, erro),
+            )
+
+    def registrar_funil(self, statuses: Counter[str | None],
+                        classes: Counter[str | None]) -> None:
+        """Persiste os `Counter`s que `pipeline.avaliar_ofertas` já calcula —
+        sem lógica nova, só grava o que o log já mostra, pra dar pra agregar
+        depois numa janela de várias horas (ver comentário da tabela)."""
+        agora = _now()
+        linhas = [(agora, "status", chave or "?", n) for chave, n in statuses.items()]
+        linhas += [(agora, "motivo_classe", chave or "?", n) for chave, n in classes.items()]
+        if not linhas:
+            return
+        with self._conn:
+            self._conn.executemany(
+                "INSERT INTO cobertura_funil (executado_em, dimensao, chave, n) "
+                "VALUES (?, ?, ?, ?)",
+                linhas,
             )
 
     def consecutive_failed_runs(self) -> int:

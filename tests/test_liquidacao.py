@@ -335,14 +335,25 @@ class TestChaveDaPartida(unittest.TestCase):
 
 
 class TestGuardaDeRegressaoNoStatsCheck(unittest.TestCase):
-    """A liquidação NÃO pode ter ampliado a cobertura do `stats_check`.
+    """A liquidação NÃO pode ter ampliado a cobertura do `stats_check` POR
+    TABELA — mudanças feitas aqui, em `liquidacao.py`, não podem vazar pra
+    `_predicado_da_perna` sem uma decisão explícita tomada LÁ. Ampliar
+    `stats_check` muda quais combos ganham `freq_conjunta_historica`, o que
+    muda o rebaixamento de confiança, o que pode mudar a stake de Kelly (via
+    `curadoria.CURADORIA_ENFORCE`) — não é algo que uma feature de
+    liquidação deveria conseguir fazer de carona.
 
-    Ampliar lá muda quais combos ganham `freq_conjunta_historica`, o que muda o
-    rebaixamento de confiança, o que muda a stake de Kelly. Uma feature de
-    relatório não pode mexer em quanto se aposta.
+    ⚠️ 2026-08-13: escanteio e "total de cartões" PASSARAM a ser cobertos em
+    `stats_check.py` — mas por uma decisão tomada DIRETAMENTE lá (pedido do
+    dono: estender a curadoria pra além de gol/HT), reusando
+    `liquidacao._parse_estatisticas` como utilitário, não "herdando"
+    cobertura da liquidação. O que este teste continua guardando é o que
+    `liquidacao.py` sabe fazer e `stats_check.py` ainda não decidiu cobrir:
+    cartão por TIME, cartão 1x2, e mercado de 2º tempo (fora de escopo dos
+    dois por motivos diferentes — ver os módulos).
     """
 
-    def test_escanteio_e_cartao_seguem_fora_do_stats_check(self):
+    def test_cartao_por_time_1x2_e_2o_tempo_seguem_fora_do_stats_check(self):
         from betano_superodds.value.market_parser import parse_leg
         from betano_superodds.value.stats_check import (_CandidatoEvento,
                                                         _predicado_da_perna)
@@ -353,7 +364,9 @@ class TestGuardaDeRegressaoNoStatsCheck(unittest.TestCase):
                             away_team="Internacional", commence_time=None,
                             sport="soccer"),
             home_id=1, away_id=2, home_nome="Corinthians", away_nome="Internacional")
-        for texto in ("Total de Escanteios: Mais de 9,5", "Total de Cartões: Mais de 4.5"):
+        for texto in ("Cartões do Corinthians Mais de 1.5",
+                     "Cartões 1x2: Corinthians",
+                     "2º tempo - total cartões Mais de 1.5"):
             pred, motivo = _predicado_da_perna(parse_leg(texto), cand)
             self.assertIsNone(pred, f"{texto} não deveria ser coberta no stats_check")
             self.assertIsNotNone(motivo)

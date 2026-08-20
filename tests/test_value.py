@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import os
 import tempfile
 import unittest
@@ -329,6 +330,238 @@ class TestChaveConsenso(unittest.TestCase):
         leg = parse_leg("Total de Gols Mais de 2.5")
         self.assertTrue(leg.suportado)
         self.assertIsNone(leg.consenso_chave)
+
+
+class TestFamiliaSetsExatosDeJogador(unittest.TestCase):
+    """Sondado em 2026-08-19 (`sondar_familias_consenso.py`): 65 eventos no
+    pool, 50 com >= CONSENSO_MIN_CASAS_PROP casas. Precisou de dois
+    consertos, não só a linha no dicionário: ampliar "ganhar" ->
+    "(ganhar|vencer)" (a grafia real usa majoritariamente "vencer") e
+    descolar o sufixo "para" na extração de entidade (mesma correção usada
+    por `probabilidade conjunta entre tempos`)."""
+
+    def test_grafia_oferta_casa_com_grafia_pool(self):
+        chave = chave_consenso("Yulia Putintseva ganhar exatamente 1 Set: Sim")
+        self.assertEqual(chave, ChaveConsenso(familia="sets_exatos_jogador",
+                                              escopo="jogador:yulia putintseva",
+                                              lado="sim", linha=None))
+        self.assertEqual(
+            chave_consenso("Luca Staeheli para vencer exatamente 1 set Sim").familia,
+            chave.familia)
+
+    def test_escopo_e_jogador_sem_a_preposicao_para(self):
+        """"<Jogador> para vencer exatamente 1 set" (grafia real do pool) não
+        pode deixar "para" grudado no nome — sem isso o escopo nunca bateria
+        com a grafia da oferta, que não tem essa preposição."""
+        chave = chave_consenso("Luca Staeheli para vencer exatamente 1 set Sim")
+        self.assertEqual(chave.escopo, "jogador:luca staeheli")
+
+    def test_apenas_ganhar_e_apenas_vencer_produzem_a_mesma_familia(self):
+        c1 = chave_consenso("Yulia Putintseva ganhar exatamente 1 Set: Sim")
+        c2 = chave_consenso("Luca Staeheli para vencer exatamente 1 set: Sim")
+        self.assertEqual(c1.familia, c2.familia)
+        self.assertEqual(c1.familia, "sets_exatos_jogador")
+
+    def test_sim_e_nao_sao_lados_distintos(self):
+        self.assertNotEqual(
+            chave_consenso("Luca Staeheli para vencer exatamente 1 set: Sim"),
+            chave_consenso("Luca Staeheli para vencer exatamente 1 set: Não"))
+
+    def test_parse_mercado_continua_recusando_sets_exatos(self):
+        """Regressão: a família nova é aditiva em `consenso_chave`, não muda
+        `suportado`/`motivo` do caminho Pinnacle."""
+        leg = parse_leg("Yulia Putintseva ganhar exatamente 1 Set: Sim")
+        self.assertFalse(leg.suportado)
+        self.assertEqual(leg.motivo, "sets exatos de um jogador")
+        self.assertIsNotNone(leg.consenso_chave)
+
+
+class TestFamiliaProbConjuntaEntreTempos(unittest.TestCase):
+    """Sondado em 2026-08-19: 85 eventos no pool, 62 com >= CONSENSO_MIN_CASAS
+    e 59 com >= CONSENSO_MIN_CASAS_PROP casas — mas o motivo funde QUATRO
+    grafias reais e semanticamente diferentes ("marcar em ambos os tempos" /
+    "vencer de zero" / "vencer um dos tempos" / "vencer ambos os tempos") sob
+    o mesmo texto de `motivo`. As provas negativas (não-colisão) importam
+    mais que as positivas aqui — sem elas as quatro produziriam a MESMA
+    ChaveConsenso, mesma classe de bug de "Cartões 1x2" x "Cartões exatos"
+    (`market_parser.py:553-564`), só que pior: as probabilidades são bem
+    diferentes entre si."""
+
+    def test_grafia_oferta_casa_com_grafia_pool(self):
+        """Mesma equipe, grafia da oferta (com ":") x grafia do pool (sem)."""
+        self.assertEqual(
+            chave_consenso("APIA Tigers FC para vencer de zero: Sim"),
+            chave_consenso("APIA Tigers FC para vencer de zero Sim"))
+
+    def test_as_quatro_subvariantes_nao_colidem(self):
+        base = "AE Kifisia FC"
+        marcar = chave_consenso(f"{base} para marcar em ambos os tempos: Sim")
+        zero = chave_consenso(f"{base} para vencer de zero: Sim")
+        um = chave_consenso(f"{base} para vencer um dos tempos: Sim")
+        ambos = chave_consenso(f"{base} para vencer ambos os tempos: Sim")
+        chaves = [marcar, zero, um, ambos]
+        for a, b in itertools.combinations(chaves, 2):
+            self.assertNotEqual(a, b, f"{a} colidiu com {b}")
+
+    def test_vencer_ambos_os_tempos_com_e_sem_os(self):
+        """"vencer ambos os tempos" (com "os") e "vencer ambos tempos" (sem)
+        são a MESMA grafia, só a EstrelaBet escreve sem o "os" — têm que
+        continuar na mesma sub-variante, não virar uma quinta categoria."""
+        self.assertEqual(
+            chave_consenso("Santos para vencer ambos os tempos: Sim"),
+            chave_consenso("Santos para vencer ambos tempos: Sim"))
+
+    def test_sim_e_nao_sao_lados_distintos_dentro_da_mesma_subvariante(self):
+        self.assertNotEqual(
+            chave_consenso("Santos para vencer de zero: Sim"),
+            chave_consenso("Santos para vencer de zero: Não"))
+
+    def test_grafia_ganhar_e_grafia_vencer_sao_a_mesma_subvariante(self):
+        self.assertEqual(
+            chave_consenso("Santos para ganhar um dos tempos: Sim").linha,
+            chave_consenso("Santos para vencer um dos tempos: Sim").linha)
+
+    def test_parse_mercado_continua_recusando(self):
+        leg = parse_leg("Santos para vencer de zero: Sim")
+        self.assertFalse(leg.suportado)
+        self.assertEqual(leg.motivo,
+                         "probabilidade conjunta entre tempos (sem equivalente na Pinnacle)")
+        self.assertIsNotNone(leg.consenso_chave)
+
+
+class TestFamiliaPrimeiroAMarcar(unittest.TestCase):
+    """Sondado em 2026-08-19: 172 eventos no pool, 80+ com >= CONSENSO_MIN_CASAS
+    casas — a família com maior cobertura potencial dos motivos sem chave,
+    mas também a única que exigiu mudança estrutural: o desfecho (quem marca
+    primeiro) é o LADO, não uma entidade que restringe o escopo como nas
+    outras famílias (`jogador:`/`time:`). Os negativos aqui são o que mais
+    importa: relaxar o regex pra casar a grafia do pool (sem ":") também
+    abriu risco de vazar mercados PARECIDOS mas diferentes."""
+
+    def test_grafia_oferta_casa_com_grafia_pool(self):
+        self.assertEqual(chave_consenso("Primeiro gol: EC Juventude"),
+                         chave_consenso("Primeiro gol EC Juventude"))
+
+    def test_lado_e_o_time_nao_um_escopo(self):
+        chave = chave_consenso("Primeiro gol: EC Juventude")
+        self.assertEqual(chave.escopo, "jogo")
+        self.assertTrue(chave.lado)
+
+    def test_combinado_com_1x2_e_recusado(self):
+        """"Primeiro gol e 1x2 (<Jogador>)" é mercado combinado real do pool
+        (2.940 linhas) — tem que ser recusado ANTES do regex de "primeiro
+        gol" (sem ":") ser relaxado, senão o combinado vaza pro consenso
+        como se fosse a família simples."""
+        self.assertIsNone(chave_consenso("Primeiro gol e 1x2 (Moussa Dembele)"))
+
+    def test_mercado_de_quando_nao_de_quem_e_recusado(self):
+        """"Primeiro gol será marcado em qual dos tempos" é sobre QUANDO
+        (1º/2º tempo), não QUEM — mercado diferente que também começa com
+        "primeiro gol" e não pode colar na mesma família."""
+        self.assertIsNone(chave_consenso(
+            "Primeiro gol será marcado em qual dos tempos 1º Tempo"))
+
+    def test_primeiro_tipo_de_gol_nao_casa(self):
+        """"Primeiro tipo de gol" (pênalti/cabeçada/etc.) tem "primeiro" e
+        "gol" no rótulo mas não adjacentes — outro mercado."""
+        self.assertIsNone(chave_consenso("Primeiro tipo de gol: Penalti"))
+
+    def test_primeiro_chute_a_gol_nao_casa(self):
+        self.assertIsNone(chave_consenso("Primeiro chute a gol EC Juventude"))
+
+    def test_e_a_mesma_familia_do_ultimo_a_marcar_nao_e_confundida(self):
+        """"Ultimo a marcar" é outra família (sequência de gols) — não tem
+        entrada em `_FAMILIA_POR_MOTIVO` ainda, continua sem chave."""
+        self.assertIsNone(chave_consenso("Ultimo a marcar: Botafogo-SP"))
+
+    def test_primeiro_tempo_ganha_escopo_1t(self):
+        self.assertEqual(
+            chave_consenso("1º tempo - primeiro gol EC Juventude").escopo, "1t")
+
+    def test_segundo_tempo_continua_segregado(self):
+        self.assertIsNone(chave_consenso("2º tempo - primeiro gol EC Juventude"))
+
+    def test_nenhum_e_um_lado_proprio(self):
+        chave = chave_consenso("Primeiro gol Nenhum")
+        self.assertEqual(chave.lado, "nenhum")
+        self.assertNotEqual(chave, chave_consenso("Primeiro gol EC Juventude"))
+
+    def test_grafias_de_time_equivalentes_casam(self):
+        """"Athletico-PR" e "Athletico PR" são o mesmo time — o normalizador
+        de TIME (não o genérico de rótulo) já resolve isso."""
+        self.assertEqual(chave_consenso("Primeiro gol: Athletico-PR"),
+                         chave_consenso("Primeiro gol Athletico PR"))
+
+    def test_times_diferentes_sao_lados_diferentes(self):
+        self.assertNotEqual(
+            chave_consenso("Primeiro gol EC Juventude"),
+            chave_consenso("Primeiro gol Remo"))
+
+    def test_parse_mercado_continua_recusando(self):
+        leg = parse_leg("Primeiro gol: EC Juventude")
+        self.assertFalse(leg.suportado)
+        self.assertEqual(leg.motivo,
+                         "primeiro a marcar (sem equivalente na Pinnacle)")
+        self.assertIsNotNone(leg.consenso_chave)
+
+
+class TestFamiliaTotalJogosDoJogador(unittest.TestCase):
+    """Sondado em 2026-08-19: 24 eventos no pool (isolando grafia de
+    JOGADOR), 16-18 com >= CONSENSO_MIN_CASAS(_PROP) casas. O motivo não vem
+    de `SEM_COBERTURA` originalmente — é setado direto por `_parse_tenis`
+    (`market_parser.py:808`) quando reconhece "total jogos" de um jogador
+    mas sabe que a Pinnacle não publica isso por jogador. `chave_consenso`
+    só enxerga `Leg.motivo` através de `_sem_cobertura`/`SEM_COBERTURA`, não
+    o texto que outro parser já calculou — por isso precisou de uma entrada
+    NOVA na tabela, com o MESMO texto de motivo, pra ligar os dois lados."""
+
+    def test_grafia_oferta_casa_com_grafia_pool(self):
+        self.assertEqual(
+            chave_consenso("Alexander Zverev total jogos: Mais de 12.5"),
+            chave_consenso("Alexander Zverev total jogos Mais de 12.5"))
+
+    def test_escopo_e_o_jogador_nao_o_generico_jogo(self):
+        """Regressão do bug que o próprio desenho deste regex evitou: uma
+        versão com `.+` antes de "total jogos" consumia o nome inteiro
+        dentro do match e zerava `escopo`, colidindo TODOS os jogadores na
+        mesma chave (`jogo`/`over`/`12.5`) — a mesma classe de bug que
+        `artilheiro (prop de jogador)` já tem hoje (não mexido, porque o
+        pool dela é 100% mercado combinado, sem dado usável)."""
+        chave = chave_consenso("Alexander Zverev total jogos: Mais de 12.5")
+        self.assertEqual(chave.escopo, "jogador:alexander zverev")
+        self.assertNotEqual(
+            chave_consenso("Alexander Zverev total jogos: Mais de 12.5"),
+            chave_consenso("Jaime Faria total jogos: Mais de 12.5"))
+
+    def test_total_do_jogo_continua_suportado_pela_pinnacle(self):
+        """"Total jogos" (sem nome antes) é o mercado do JOGO inteiro — a
+        Pinnacle publica isso (`games_total`), tem que continuar
+        `suportado=True`, nunca cair pra consenso."""
+        leg = parse_leg("Total jogos: Mais de 20.5")
+        self.assertTrue(leg.suportado)
+        self.assertIsNone(leg.consenso_chave)
+
+    def test_total_por_set_continua_suportado_pela_pinnacle(self):
+        leg = parse_leg("Primeiro set - total jogos: Mais de 9.5")
+        self.assertTrue(leg.suportado)
+        self.assertIsNone(leg.consenso_chave)
+
+    def test_codigo_numerico_de_dupla_nao_vira_jogador(self):
+        """"1 total jogos"/"2 total jogos" é o código numérico de dupla no
+        tênis de duplas, não nome — não pode virar `jogador:1`."""
+        self.assertIsNone(chave_consenso("1 total jogos: Mais de 12.5"))
+
+    def test_over_e_under_sao_lados_distintos(self):
+        self.assertNotEqual(
+            chave_consenso("Alexander Zverev total jogos: Mais de 12.5"),
+            chave_consenso("Alexander Zverev total jogos: Menos de 12.5"))
+
+    def test_parse_mercado_continua_recusando(self):
+        leg = parse_leg("Alexander Zverev total jogos: Mais de 12.5")
+        self.assertFalse(leg.suportado)
+        self.assertEqual(leg.motivo,
+                         "total de games do jogador não coberto pela Pinnacle")
+        self.assertIsNotNone(leg.consenso_chave)
 
 
 class TestMatcher(unittest.TestCase):

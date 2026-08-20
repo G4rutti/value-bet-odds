@@ -169,6 +169,81 @@ GET /event/{id}/lineups (jogo futuro, confirmed:false)
     Luan Cândido        — type=missing, reason=13, red_card_suspension
 ```
 
+## Achado real — FlashScore (2026-08-13)
+
+Investigado especificamente pra preencher a lacuna que o SofaScore tem: `/event/{id}/h2h` do SofaScore só devolve contagem agregada (`homeWins/awayWins/draws`), nunca a lista dos confrontos. O FlashScore tem a lista de verdade.
+
+```
+GET https://global.flashscore.ninja/2/x/feed/df_hh_1_{matchId}
+```
+
+Pública — **sem login, sem cookie** (confirmado com uma `curl_cffi.Session` nova, sem nenhum cookie setado) — mas precisa de dois headers que a Pinnacle/SofaScore não pedem:
+
+```python
+headers = {
+    "Referer": "https://www.flashscore.com/match/.../h2h/overall/?mid={matchId}",
+    "x-fsign": "SW9D1eZo",   # token estático — mesmo valor documentado por
+                              # scrapers de terceiros há anos, não é por
+                              # sessão/usuário
+}
+```
+
+Sem os dois headers: `401 Unauthorized`. Com eles, `impersonate="chrome"`
+sozinho (nem precisou tentar `Origin`/`User-Agent`) já bastou.
+
+`{matchId}` é o valor do query param `mid=` na URL da página do jogo (ex.:
+`.../h2h/overall/?mid=neOLCi6t` → `matchId = "neOLCi6t"`) — o mesmo id em
+`/match/{sport}/{slug-casa}/{slug-fora}/?mid=...`. Pra achar o id sem abrir a
+página do jogo manualmente: `/search/all?q={termo}` (ver notas de payload
+abaixo) ou a página de fixtures do time.
+
+⚠️ **O payload NÃO é JSON.** É um formato próprio, achatado: registros
+separados por `¬` (U+00AC), campo separado do valor por `÷` (U+00F7),
+`KEY÷VALUE¬KEY÷VALUE¬...`. Alguns campos vêm com prefixo `~` marcando início
+de bloco/seção (`~KA`, `~KB`, `~KC`). Parser mínimo:
+
+```python
+registros = texto.split("¬")
+campos = dict(r.split("÷", 1) for r in registros if "÷" in r)
+```
+
+Campos confirmados por sondagem ao vivo (futebol E basquete, mesmo
+formato nos dois):
+
+```
+~KA   nome da sub-aba ("Overall" | "{Time A} - Home" | "{Time B} - Away")
+~KB   título da seção ("Last matches: {Time}" | "Head-to-head matches")
+KC    timestamp do jogo (unix, segundos)
+KJ    nome do time 1 (prefixo "*" quando é o mandante)
+KK    nome do time 2
+KL    placar "casa:fora" (ex. "0:3")
+KF    nome da competição
+KS    "home"/"away"/"draw" — lado do time observado no resultado
+EC/ED escudo/logo do time 1 e 2 (nome de arquivo, mesmo CDN static.flashscore.com)
+```
+
+Uma chamada só devolve as TRÊS sub-abas de uma vez (Overall + Home + Away),
+cada uma com duas seções "Last matches: {Time}" (histórico isolado do time,
+mesmo dado que o SofaScore já dá) **e uma seção "Head-to-head matches"** —
+essa é a nova: confirmado ao vivo que TODO registro dessa seção tem os dois
+nomes de time batendo exatamente com os dois times do confronto (testado com
+Flamengo RJ × Botafogo RJ, 5+ jogos reais de Serie A/Carioca/Supercopa do
+Brasil voltando a 2025), nunca um adversário de fora do confronto. Testado
+também em basquete (Toronto Raptors × Miami Heat, NBA) com o mesmo endpoint,
+mesmo formato — a estrutura é sport-agnostic.
+
+⚠️ **Fragilidade a documentar no código**: `x-fsign` é um valor estático
+hardcoded, não gerado por sessão — se o FlashScore rotacionar esse token no
+futuro, todo request passa a devolver 401 de uma vez. Falha deve virar log
+explícito (mesmo princípio de "casa zerada é sempre bug"), nunca silêncio.
+
+**Veredito**: GO. Critérios do plano de curadoria (`curadoria.py`) batidos:
+sem login, sem 403, H2H real (lista de jogos, não agregado), cobre múltiplos
+esportes na mesma estrutura. Não foi necessário testar 365Scores/LiveScore/
+ESPN/AiScore (candidatos secundários levantados na mesma investigação) — o
+FlashScore já resolve a lacuna sozinho; reconsiderar as alternativas só se
+o FlashScore parar de responder ou rotacionar o `x-fsign`.
+
 ## Fora de escopo
 
 Nada do SofaScore ficou fora por exigir sessão. O que ficou fora foi por

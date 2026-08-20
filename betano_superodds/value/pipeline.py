@@ -360,6 +360,13 @@ def avaliar_ofertas(ofertas: Iterable[dict], storage=None) -> list[dict]:
         log.info("edges: min %+.1f%% / max %+.1f%% / %d value(s)",
                  min(edges), max(edges), len(values))
 
+    # Persiste os mesmos Counters do log acima, pra dar pra medir o funil
+    # numa janela de várias horas em vez de um ciclo isolado — a fila anda
+    # (avalia sempre os mais perto do kickoff), então comparar ciclo contra
+    # ciclo é ruído puro. Ver comentário da tabela `cobertura_funil`.
+    if storage is not None:
+        storage.registrar_funil(statuses, classes)
+
     return resultados
 
 
